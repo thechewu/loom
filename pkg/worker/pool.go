@@ -105,24 +105,21 @@ func (p *Pool) Spawn(name string, item *beadsclient.Issue) error {
 		return fmt.Errorf("write prompt: %w", err)
 	}
 
-	// Build agent command
-	// Use -p (non-interactive print mode) with the prompt as a positional arg.
-	// Also pass --dangerously-skip-permissions so the agent can write files
-	// without interactive approval in the headless worktree.
+	// Build agent command based on the agent type.
 	ctx, cancel := context.WithCancel(context.Background())
-	args := []string{"-p", "--dangerously-skip-permissions"}
-	args = append(args, p.AgentArgs...)
-	args = append(args, prompt)
+	agentBin, args := buildAgentArgs(p.AgentCmd, p.AgentArgs, prompt)
 
-	cmd := exec.CommandContext(ctx, p.AgentCmd, args...)
+	cmd := exec.CommandContext(ctx, agentBin, args...)
 	cmd.Dir = worktreePath
 
-	// Build clean environment: strip CLAUDECODE to avoid nested session detection
+	// Build clean environment
 	var cleanEnv []string
 	for _, e := range os.Environ() {
-		if !strings.HasPrefix(e, "CLAUDECODE=") {
-			cleanEnv = append(cleanEnv, e)
+		// Strip session env vars that cause nested-agent detection
+		if strings.HasPrefix(e, "CLAUDECODE=") {
+			continue
 		}
+		cleanEnv = append(cleanEnv, e)
 	}
 	cleanEnv = append(cleanEnv,
 		"LOOM_WORKER="+name,
@@ -404,6 +401,37 @@ func (p *Pool) CheckActivity() map[string]time.Duration {
 		stale[name] = inactive
 	}
 	return stale
+}
+
+// --- agent invocation ---
+
+// buildAgentArgs returns the binary and arguments for running an agent
+// in non-interactive headless mode. Supports known agents (claude, kiro)
+// with their native flags, and a generic fallback for custom agents.
+func buildAgentArgs(agentCmd string, extraArgs []string, prompt string) (string, []string) {
+	// Normalize: extract the base command name (handle paths like /usr/bin/claude)
+	base := filepath.Base(agentCmd)
+	base = strings.TrimSuffix(base, ".exe")
+	base = strings.TrimSuffix(base, "-cli")
+
+	var args []string
+	switch base {
+	case "claude":
+		// claude -p --dangerously-skip-permissions [extra-args] "prompt"
+		args = []string{"-p", "--dangerously-skip-permissions"}
+		args = append(args, extraArgs...)
+		args = append(args, prompt)
+	case "kiro":
+		// kiro-cli chat --no-interactive --trust-all-tools [extra-args] "prompt"
+		args = []string{"chat", "--no-interactive", "--trust-all-tools"}
+		args = append(args, extraArgs...)
+		args = append(args, prompt)
+	default:
+		// Generic: pass extra args then the prompt as the last positional arg
+		args = append(args, extraArgs...)
+		args = append(args, prompt)
+	}
+	return agentCmd, args
 }
 
 // --- git commit helpers ---

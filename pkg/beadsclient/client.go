@@ -149,17 +149,17 @@ func (c *Client) ListPendingWork() ([]Issue, error) {
 	return c.listIssues("open", LabelPending, "work")
 }
 
-// ListAllWork returns all work items (open and closed).
+// ListAllWork returns all work items regardless of status.
 func (c *Client) ListAllWork() ([]Issue, error) {
-	open, err := c.listIssues("open", LabelWork, "work")
-	if err != nil {
-		return nil, err
+	var all []Issue
+	for _, status := range []string{"open", "in_progress", "closed"} {
+		items, err := c.listIssues(status, LabelWork, "work")
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
 	}
-	closed, err := c.listIssues("closed", LabelWork, "work")
-	if err != nil {
-		return nil, err
-	}
-	return append(open, closed...), nil
+	return all, nil
 }
 
 // ClaimWork atomically assigns a pending work item to a worker.

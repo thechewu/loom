@@ -459,7 +459,13 @@ var logsCmd = &cobra.Command{
 
 		if len(args) > 0 {
 			// Tail a specific worker
-			return tailWorkerLog(filepath.Join(worktreeDir, args[0], ".loom", "result.txt"))
+			resultPath := filepath.Join(worktreeDir, args[0], ".loom", "result.txt")
+			if _, err := os.Stat(resultPath); os.IsNotExist(err) {
+				fmt.Printf("%s: worker completed (worktree cleaned up)\n", args[0])
+				fmt.Printf("use 'loom queue show <bead-id>' to see results\n")
+				return nil
+			}
+			return tailWorkerLog(resultPath)
 		}
 
 		// Tail all workers

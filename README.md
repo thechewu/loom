@@ -88,8 +88,23 @@ Flags:
 - `--repo PATH` -- git repo path (default `.`)
 - `--poll DURATION` -- poll interval (default `5s`)
 - `--stuck-timeout DURATION` -- kill worker if no output for this long (default `10m`)
-- `--agent CMD` -- agent command (default `claude`)
+- `--agent CMD` -- agent command (default `claude`). Supported agents: `claude`, `kiro-cli`, or any custom command
 - `--agent-args` -- extra args passed to the agent
+
+### Using with different agents
+
+Loom auto-detects known agent CLIs and uses their native headless flags:
+
+```bash
+# Claude (default)
+loom run --workers 4
+
+# Kiro
+loom run --workers 4 --agent kiro-cli
+
+# Custom agent (prompt passed as last positional arg)
+loom run --workers 4 --agent my-agent --agent-args="--headless,--no-confirm"
+```
 
 ### Queue work while running
 

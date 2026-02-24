@@ -39,7 +39,7 @@ pkg/prompt/prompt.go           Canonical CLAUDE.md snippet injected into project
 - **Beads as state store**: All work items and worker state live in beads (Dolt-backed). No in-memory state survives restarts.
 - **One worktree per worker**: Each agent gets full repo isolation via `git worktree add`.
 - **Branches per task, not per worker**: Branches are named `loom/<bead-id>` so they survive worker reassignment. Prevents the race where a recycled worker destroys a pending-merge branch.
-- **Headless agents**: Workers run `claude -p --dangerously-skip-permissions` — no interactive approval.
+- **Headless agents**: Workers run in non-interactive mode. Agent invocation is auto-detected: `claude -p --dangerously-skip-permissions`, `kiro-cli chat --no-interactive --trust-all-tools`, or generic (prompt as last arg). See `buildAgentArgs()` in `pkg/worker/pool.go`.
 - **Automatic retries**: Failed tasks are requeued up to 3 times (configurable via MaxRetries). Stuck workers (no output growth for StuckTimeout) are killed and their tasks requeued.
 - **CLAUDE.md injection**: `loom init` appends usage instructions to the project's CLAUDE.md so Claude CLI sessions automatically discover loom.
 
