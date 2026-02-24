@@ -84,8 +84,8 @@ func (m *Merger) mergeOne(item beadsclient.Issue) bool {
 
 	// Ensure we're on main
 	if err := m.gitRun("checkout", "main"); err != nil {
-		m.Logger.Printf("merger: checkout main failed: %v — dropping %s", err, item.ID)
-		m.finish(item.ID, branch)
+		// Transient git state issue — leave item in pending-merge for retry
+		m.Logger.Printf("merger: checkout main failed: %v — will retry %s next poll", err, item.ID)
 		return false
 	}
 
@@ -97,7 +97,7 @@ func (m *Merger) mergeOne(item beadsclient.Issue) bool {
 
 	if mergeErr == nil {
 		m.Logger.Printf("merged %s successfully", item.ID)
-		m.finish(item.ID, branch)
+		m.markMerged(item.ID, branch)
 		return true
 	}
 
@@ -106,15 +106,15 @@ func (m *Merger) mergeOne(item beadsclient.Issue) bool {
 
 	if m.resolveConflicts(item) {
 		m.Logger.Printf("merger: agent resolved conflicts for %s", item.ID)
-		m.finish(item.ID, branch)
+		m.markMerged(item.ID, branch)
 		return true
 	}
 
-	// Agent couldn't resolve — drop
+	// Agent couldn't resolve — drop changes
 	m.Logger.Printf("merger: resolution failed for %s, dropping changes: %s",
 		item.ID, strings.TrimSpace(string(out)))
 	m.gitRun("merge", "--abort")
-	m.finish(item.ID, branch)
+	m.drop(item.ID, branch)
 	return false
 }
 
@@ -232,14 +232,20 @@ func buildMergeAgentArgs(agentCmd string, extraArgs []string, prompt string) (st
 	return agentCmd, args
 }
 
-// finish marks a work item done and cleans up its branch.
-func (m *Merger) finish(beadID, branch string) {
+// markMerged marks a work item as successfully merged and cleans up its branch.
+func (m *Merger) markMerged(beadID, branch string) {
 	if err := m.Beads.MarkMerged(beadID); err != nil {
 		m.Logger.Printf("merger: mark merged %s: %v", beadID, err)
 	}
-	if branch != "" {
-		m.deleteBranch(branch)
+	m.deleteBranch(branch)
+}
+
+// drop marks a work item as done (changes dropped) and cleans up its branch.
+func (m *Merger) drop(beadID, branch string) {
+	if err := m.Beads.CompleteWork(beadID, "merge conflict — changes dropped"); err != nil {
+		m.Logger.Printf("merger: complete (drop) %s: %v", beadID, err)
 	}
+	m.deleteBranch(branch)
 }
 
 func (m *Merger) deleteBranch(branch string) {

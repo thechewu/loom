@@ -109,6 +109,7 @@ Flags:
 - `--stuck-timeout DURATION` -- kill worker if no output for this long (default `10m`)
 - `--agent CMD` -- agent command (default `claude`). Supported agents: `claude`, `kiro-cli`, or any custom command
 - `--agent-args` -- extra args passed to the agent
+- `--max-depth N` -- max recursion depth for subtask decomposition (default `3`)
 
 ### Using with different agents
 
@@ -142,6 +143,7 @@ loom queue show <id>     # item details including failure reasons and retry hist
 loom worker list         # worker states
 loom logs                # last 20 lines from all active workers
 loom logs <worker>       # tail a specific worker's output (follow mode)
+loom dashboard           # live terminal dashboard (auto-refreshes every 2s)
 ```
 
 ### Manual merge
@@ -188,6 +190,12 @@ pkg/prompt/prompt.go           CLAUDE.md snippet injected by `loom init`
 - Workers producing no output for `--stuck-timeout` are killed and their tasks requeued
 - After exhausting retries, tasks are marked permanently failed with a reason
 - Use `loom queue show <id>` to see failure reasons and retry history
+
+### Subtask Decomposition
+
+Worker agents can call `loom queue add` to create subtasks that go back into the queue. This enables recursive task decomposition — a worker can break a large task into smaller parallel pieces without the orchestrator knowing in advance. Subtasks are independent queue items that branch from main, not from the parent task.
+
+Recursion depth is capped by `--max-depth` (default 3). Workers at the depth limit get a clear error if they try to queue more subtasks, so they fall back to doing the work directly.
 
 ### Branch Naming
 

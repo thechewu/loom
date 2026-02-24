@@ -40,6 +40,7 @@ type Config struct {
 	PollInterval time.Duration // poll interval
 	StuckTimeout time.Duration // mark worker stuck after this
 	MaxRetries   int           // per-item retry limit
+	MaxDepth     int           // max recursion depth for subtasks (default 3)
 }
 
 // DefaultConfig returns sensible defaults.
@@ -70,7 +71,11 @@ func New(cfg Config) (*Supervisor, error) {
 	if maxRetries == 0 {
 		maxRetries = 3
 	}
-	pool := worker.NewPool(beads, cfg.RepoPath, worktreeDir, cfg.AgentCmd, cfg.AgentArgs, cfg.MaxWorkers, maxRetries)
+	maxDepth := cfg.MaxDepth
+	if maxDepth == 0 {
+		maxDepth = 3
+	}
+	pool := worker.NewPool(beads, cfg.RepoPath, worktreeDir, cfg.AgentCmd, cfg.AgentArgs, cfg.MaxWorkers, maxRetries, maxDepth)
 
 	m := &merger.Merger{
 		Beads:        beads,

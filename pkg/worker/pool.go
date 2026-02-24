@@ -20,6 +20,7 @@ import (
 type Pool struct {
 	MaxWorkers  int
 	MaxRetries  int
+	MaxDepth    int      // max recursion depth for subtask decomposition
 	AgentCmd    string   // e.g. "claude"
 	AgentArgs   []string // e.g. ["--print"]
 	RepoPath    string   // base git repo
@@ -43,10 +44,11 @@ type runningWorker struct {
 }
 
 // NewPool creates a worker pool.
-func NewPool(beads *beadsclient.Client, repoPath, worktreeDir, agentCmd string, agentArgs []string, maxWorkers, maxRetries int) *Pool {
+func NewPool(beads *beadsclient.Client, repoPath, worktreeDir, agentCmd string, agentArgs []string, maxWorkers, maxRetries, maxDepth int) *Pool {
 	return &Pool{
 		MaxWorkers:  maxWorkers,
 		MaxRetries:  maxRetries,
+		MaxDepth:    maxDepth,
 		AgentCmd:    agentCmd,
 		AgentArgs:   agentArgs,
 		RepoPath:    repoPath,
@@ -121,9 +123,16 @@ func (p *Pool) Spawn(name string, item *beadsclient.Issue) error {
 		}
 		cleanEnv = append(cleanEnv, e)
 	}
+	// Propagate recursion depth so subtasks know their level
+	currentDepth := 0
+	if v := os.Getenv("LOOM_DEPTH"); v != "" {
+		fmt.Sscanf(v, "%d", &currentDepth)
+	}
 	cleanEnv = append(cleanEnv,
 		"LOOM_WORKER="+name,
 		"LOOM_BEAD_ID="+item.ID,
+		fmt.Sprintf("LOOM_DEPTH=%d", currentDepth+1),
+		fmt.Sprintf("LOOM_MAX_DEPTH=%d", p.MaxDepth),
 	)
 	cmd.Env = cleanEnv
 

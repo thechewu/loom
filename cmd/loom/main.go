@@ -41,10 +41,12 @@ func init() {
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(promptCmd)
 	rootCmd.AddCommand(logsCmd)
+	rootCmd.AddCommand(dashboardCmd)
 
 	queueCmd.AddCommand(queueAddCmd)
 	queueCmd.AddCommand(queueListCmd)
 	queueCmd.AddCommand(queueShowCmd)
+	queueCmd.AddCommand(queueClearCmd)
 
 	workerCmd.AddCommand(workerListCmd)
 
@@ -63,6 +65,11 @@ func init() {
 	runCmd.Flags().Duration("poll", 5*time.Second, "poll interval")
 	runCmd.Flags().Duration("stuck-timeout", 10*time.Minute, "mark worker stuck after this duration")
 	runCmd.Flags().String("repo", ".", "git repository path")
+	runCmd.Flags().Int("max-depth", 3, "max recursion depth for subtask decomposition")
+
+	dashboardCmd.Flags().DurationP("refresh", "r", 2*time.Second, "refresh interval")
+
+	queueClearCmd.Flags().String("status", "", "only clear items with this status (pending, in_progress, done, failed, pending-merge)")
 }
 
 // --- init ---
@@ -141,6 +148,18 @@ var queueAddCmd = &cobra.Command{
 		}
 		if title == "" {
 			return fmt.Errorf("title is required (use -t or pass as argument)")
+		}
+
+		// Recursion guard: if we're inside a worker, check depth limit
+		if depthStr := os.Getenv("LOOM_DEPTH"); depthStr != "" {
+			var depth, maxDepth int
+			fmt.Sscanf(depthStr, "%d", &depth)
+			if maxStr := os.Getenv("LOOM_MAX_DEPTH"); maxStr != "" {
+				fmt.Sscanf(maxStr, "%d", &maxDepth)
+			}
+			if maxDepth > 0 && depth >= maxDepth {
+				return fmt.Errorf("recursion depth limit reached (%d/%d) — cannot create subtasks at this depth", depth, maxDepth)
+			}
 		}
 
 		beads, err := openBeads()
@@ -233,6 +252,48 @@ var queueShowCmd = &cobra.Command{
 	},
 }
 
+var queueClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Close work items (all active, or filtered by --status)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		filter, _ := cmd.Flags().GetString("status")
+
+		beads, err := openBeads()
+		if err != nil {
+			return err
+		}
+
+		items, err := beads.ListAllWork()
+		if err != nil {
+			return err
+		}
+
+		closed := 0
+		for _, it := range items {
+			status := effectiveStatus(it)
+			if filter != "" {
+				// Only clear items matching the filter
+				if status != filter {
+					continue
+				}
+			} else {
+				// Default: skip already-terminal items
+				if status == "done" || status == "failed" {
+					continue
+				}
+			}
+			if err := beads.CompleteWork(it.ID, "cleared"); err != nil {
+				fmt.Printf("warning: could not close %s: %v\n", it.ID, err)
+				continue
+			}
+			closed++
+		}
+
+		fmt.Printf("closed %d item(s)\n", closed)
+		return nil
+	},
+}
+
 // --- worker ---
 
 var workerCmd = &cobra.Command{
@@ -294,6 +355,7 @@ var runCmd = &cobra.Command{
 		poll, _ := cmd.Flags().GetDuration("poll")
 		stuckTimeout, _ := cmd.Flags().GetDuration("stuck-timeout")
 		repoPath, _ := cmd.Flags().GetString("repo")
+		maxDepth, _ := cmd.Flags().GetInt("max-depth")
 
 		repoPath, err := filepath.Abs(repoPath)
 		if err != nil {
@@ -308,6 +370,7 @@ var runCmd = &cobra.Command{
 			MaxWorkers:   maxWorkers,
 			PollInterval: poll,
 			StuckTimeout: stuckTimeout,
+			MaxDepth:     maxDepth,
 		}
 
 		sv, err := supervisor.New(cfg)

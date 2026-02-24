@@ -50,6 +50,10 @@ Worker agents start with **zero context** from this session. The ` + "`-d`" + ` 
 
 Bad: "Add a caching layer to the API client"
 Good: "Create src/cache.py with a class DiskCache that wraps requests. Constructor takes cache_dir: str and ttl_seconds: int = 3600. Method get(url: str) -> Optional[Response] checks for a cached JSON file at cache_dir/<url_hash>.json, returns None if missing or expired. Method set(url: str, response: Response) writes the JSON. Add tests in tests/test_cache.py covering: cache miss returns None, cache hit returns stored response, expired entry returns None."
+
+### Subtask Decomposition
+
+Worker agents can use ` + "`loom queue add`" + ` to create subtasks that go back into the queue. This allows a worker to break a large task into smaller parallel pieces. Subtasks are independent queue items — they branch from main, not from the parent task. Recursion is capped by ` + "`--max-depth`" + ` (default 3). If you hit the depth limit, do the remaining work directly instead of decomposing further.
 `
 
 // Sentinel is the marker string used to detect if the loom section

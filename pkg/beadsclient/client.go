@@ -30,14 +30,27 @@ const (
 
 // Client wraps the bd CLI for beads operations.
 type Client struct {
-	BeadsDir string // path to .beads directory
-	LoomDir  string // path to .loom directory
+	BeadsDir  string // path to .beads directory
+	LoomDir   string // path to .loom directory
+	Workspace string // workspace name for scoping (derived from repo dir name)
+}
+
+// WorkspaceLabel returns the label used to scope items to this workspace.
+func (c *Client) WorkspaceLabel() string {
+	return "loom:ws:" + c.Workspace
 }
 
 // NewClient creates a beads client. beadsDir is the directory containing
 // the .beads database, loomDir is the .loom workspace directory.
+// Workspace is derived from the repo directory name.
 func NewClient(beadsDir, loomDir string) *Client {
-	return &Client{BeadsDir: beadsDir, LoomDir: loomDir}
+	workspace := filepath.Base(beadsDir)
+	if workspace == "." || workspace == "" {
+		if abs, err := filepath.Abs(beadsDir); err == nil {
+			workspace = filepath.Base(abs)
+		}
+	}
+	return &Client{BeadsDir: beadsDir, LoomDir: loomDir, Workspace: workspace}
 }
 
 // Init initializes the beads database with server mode and loom's custom types.
@@ -127,6 +140,7 @@ func (c *Client) CreateWorkItem(title, description string, priority int) (string
 		"--priority", fmt.Sprintf("%d", priority),
 		"--label", LabelWork,
 		"--label", LabelPending,
+		"--label", c.WorkspaceLabel(),
 	}
 	if description != "" {
 		args = append(args, "--description", description)
@@ -349,6 +363,7 @@ func (c *Client) CreateWorkerBead(name string, fields *WorkerFields) error {
 		"--description", desc,
 		"--type", "worker",
 		"--label", LabelWorker,
+		"--label", c.WorkspaceLabel(),
 		"--force",
 	)
 	if err != nil {
@@ -508,6 +523,8 @@ func (c *Client) listIssues(status, label, issueType string) ([]Issue, error) {
 	if issueType != "" {
 		args = append(args, "--type", issueType)
 	}
+	// Scope to this workspace
+	args = append(args, "--label", c.WorkspaceLabel())
 
 	out, err := c.run("bd", args...)
 	if err != nil {
