@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -163,9 +162,13 @@ var queueAddCmd = &cobra.Command{
 		// Recursion guard: if we're inside a worker, check depth limit
 		if depthStr := os.Getenv("LOOM_DEPTH"); depthStr != "" {
 			var depth, maxDepth int
-			fmt.Sscanf(depthStr, "%d", &depth)
+			if _, err := fmt.Sscanf(depthStr, "%d", &depth); err != nil {
+				return fmt.Errorf("invalid LOOM_DEPTH %q: %w", depthStr, err)
+			}
 			if maxStr := os.Getenv("LOOM_MAX_DEPTH"); maxStr != "" {
-				fmt.Sscanf(maxStr, "%d", &maxDepth)
+				if _, err := fmt.Sscanf(maxStr, "%d", &maxDepth); err != nil {
+					return fmt.Errorf("invalid LOOM_MAX_DEPTH %q: %w", maxStr, err)
+				}
 			}
 			if maxDepth > 0 && depth >= maxDepth {
 				return fmt.Errorf("recursion depth limit reached (%d/%d) — cannot create subtasks at this depth", depth, maxDepth)
@@ -718,26 +721,32 @@ func tailWorkerLog(path string) error {
 	defer f.Close()
 
 	// Print existing content
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fmt.Println(scanner.Text())
+	buf := make([]byte, 4096)
+	for {
+		n, err := f.Read(buf)
+		if n > 0 {
+			os.Stdout.Write(buf[:n])
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
 	}
 
 	// Follow new output
 	fmt.Println("--- following (ctrl-c to stop) ---")
 	for {
-		line, err := f.Read(make([]byte, 0))
-		_ = line
-		if err == io.EOF {
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-		buf := make([]byte, 4096)
 		n, err := f.Read(buf)
 		if n > 0 {
 			os.Stdout.Write(buf[:n])
 		}
-		if err != nil && err != io.EOF {
+		if err == io.EOF {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		if err != nil {
 			return err
 		}
 	}
@@ -955,13 +964,15 @@ type loomConfig struct {
 	MergeBranch string `json:"merge_branch"`
 }
 
-// loadConfigFile reads .loom/config.json. Returns zero-value if missing or invalid.
+// loadConfigFile reads .loom/config.json. Returns zero-value if missing.
 func loadConfigFile(loomDir string) loomConfig {
 	var cfg loomConfig
 	data, err := os.ReadFile(filepath.Join(loomDir, "config.json"))
 	if err != nil {
 		return cfg
 	}
-	json.Unmarshal(data, &cfg)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: invalid %s: %v\n", filepath.Join(loomDir, "config.json"), err)
+	}
 	return cfg
 }

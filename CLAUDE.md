@@ -11,9 +11,8 @@ Loom is a lightweight multi-agent orchestrator for Git repos. It spawns parallel
 ```bash
 go build -o loom ./cmd/loom/       # build binary
 go vet ./...                        # lint
+go test ./...                       # run all tests
 ```
-
-No test suite yet — contributions welcome.
 
 ## Architecture
 
@@ -93,10 +92,13 @@ This project uses [loom](https://github.com/thechewu/loom) for parallel task exe
 
 ### When to Use Loom
 
-Use loom when you have **independent tasks** that touch **different files** and have **clear specs**:
+Use loom when you have **3+ independent tasks** that each take meaningful effort, touch **different files**, and have **clear specs**:
 - Writing tests for multiple modules
 - Applying mechanical changes across files (type hints, docstrings, lint fixes)
 - Creating multiple new files from well-defined specs
+- Implementing independent features or components in parallel
+
+The break-even point is ~3 tasks. Below that, the overhead of writing detailed descriptions and running the supervisor outweighs the parallelism benefit.
 
 ### When NOT to Use Loom
 
@@ -104,7 +106,8 @@ Do the work directly when:
 - The task requires **exploration** (debugging, profiling, understanding unfamiliar code)
 - Changes are **interdependent** (feature B depends on how you implement feature A)
 - You need to **iterate** (write → test → fix → retry)
-- Multiple tasks **modify the same file** (merge conflicts will drop work)
+- Multiple tasks **modify the same file** (merge conflicts are resolved automatically but may drop changes if resolution fails)
+- Each task is **small** (if writing the description takes longer than doing the work, skip loom)
 
 Workers are executors, not thinkers. They follow a spec — they don't explore, investigate, or make design decisions. If the task requires understanding the problem before solving it, do it directly.
 
