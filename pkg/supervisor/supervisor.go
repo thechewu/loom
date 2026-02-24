@@ -41,6 +41,8 @@ type Config struct {
 	StuckTimeout time.Duration // mark worker stuck after this
 	MaxRetries   int           // per-item retry limit
 	MaxDepth     int           // max recursion depth for subtasks (default 3)
+	MergeMode    string        // "main" (default), "loom", "none"
+	MergeBranch  string        // target branch for "loom" mode (default: "loom")
 }
 
 // DefaultConfig returns sensible defaults.
@@ -77,14 +79,38 @@ func New(cfg Config) (*Supervisor, error) {
 	}
 	pool := worker.NewPool(beads, cfg.RepoPath, worktreeDir, cfg.AgentCmd, cfg.AgentArgs, cfg.MaxWorkers, maxRetries, maxDepth)
 
-	m := &merger.Merger{
-		Beads:        beads,
-		RepoPath:     cfg.RepoPath,
-		WorktreeDir:  worktreeDir,
-		PollInterval: cfg.PollInterval,
-		AgentCmd:     cfg.AgentCmd,
-		AgentArgs:    cfg.AgentArgs,
-		Logger:       log.Default(),
+	// Resolve merge mode
+	mergeMode := cfg.MergeMode
+	if mergeMode == "" {
+		mergeMode = "main"
+	}
+	switch mergeMode {
+	case "main", "loom", "none":
+		// valid
+	default:
+		return nil, fmt.Errorf("invalid merge mode %q: must be main, loom, or none", mergeMode)
+	}
+
+	// Create merger unless mode is "none"
+	var m *merger.Merger
+	if mergeMode != "none" {
+		targetBranch := "main"
+		if mergeMode == "loom" {
+			targetBranch = cfg.MergeBranch
+			if targetBranch == "" {
+				targetBranch = "loom"
+			}
+		}
+		m = &merger.Merger{
+			Beads:        beads,
+			RepoPath:     cfg.RepoPath,
+			WorktreeDir:  worktreeDir,
+			PollInterval: cfg.PollInterval,
+			AgentCmd:     cfg.AgentCmd,
+			AgentArgs:    cfg.AgentArgs,
+			TargetBranch: targetBranch,
+			Logger:       log.Default(),
+		}
 	}
 
 	return &Supervisor{
@@ -119,12 +145,16 @@ func (sv *Supervisor) Run(ctx context.Context) error {
 	sv.Logger.Printf("supervisor started: max_workers=%d poll=%s stuck_timeout=%s",
 		sv.Pool.MaxWorkers, sv.PollInterval, sv.StuckTimeout)
 
-	// Start merger in background
-	go func() {
-		if err := sv.Merger.Run(ctx); err != nil && ctx.Err() == nil {
-			sv.Logger.Printf("merger exited: %v", err)
-		}
-	}()
+	// Start merger in background (unless merge mode is "none")
+	if sv.Merger != nil {
+		go func() {
+			if err := sv.Merger.Run(ctx); err != nil && ctx.Err() == nil {
+				sv.Logger.Printf("merger exited: %v", err)
+			}
+		}()
+	} else {
+		sv.Logger.Println("merger disabled (merge mode: none)")
+	}
 
 	ticker := time.NewTicker(sv.PollInterval)
 	defer ticker.Stop()

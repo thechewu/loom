@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -68,6 +69,10 @@ func init() {
 	runCmd.Flags().Duration("stuck-timeout", 10*time.Minute, "mark worker stuck after this duration")
 	runCmd.Flags().String("repo", ".", "git repository path")
 	runCmd.Flags().Int("max-depth", 3, "max recursion depth for subtask decomposition")
+	runCmd.Flags().String("merge-mode", "", "merge behavior: main (default), loom, none")
+	runCmd.Flags().String("merge-branch", "", "target branch for loom merge mode (default: loom)")
+
+	mergeCmd.Flags().String("branch", "", "target branch to merge into (default: main)")
 
 	dashboardCmd.Flags().DurationP("refresh", "r", 2*time.Second, "refresh interval")
 
@@ -456,8 +461,22 @@ var runCmd = &cobra.Command{
 			return err
 		}
 
+		// Load config file, then apply CLI flag overrides
+		loomDir := filepath.Join(repoPath, ".loom")
+		fileCfg := loadConfigFile(loomDir)
+
+		mergeMode := fileCfg.MergeMode
+		if cmd.Flags().Changed("merge-mode") {
+			mergeMode, _ = cmd.Flags().GetString("merge-mode")
+		}
+
+		mergeBranch := fileCfg.MergeBranch
+		if cmd.Flags().Changed("merge-branch") {
+			mergeBranch, _ = cmd.Flags().GetString("merge-branch")
+		}
+
 		cfg := supervisor.Config{
-			LoomDir:      filepath.Join(repoPath, ".loom"),
+			LoomDir:      loomDir,
 			RepoPath:     repoPath,
 			AgentCmd:     agentCmd,
 			AgentArgs:    agentArgs,
@@ -465,6 +484,8 @@ var runCmd = &cobra.Command{
 			PollInterval: poll,
 			StuckTimeout: stuckTimeout,
 			MaxDepth:     maxDepth,
+			MergeMode:    mergeMode,
+			MergeBranch:  mergeBranch,
 		}
 
 		sv, err := supervisor.New(cfg)
@@ -575,7 +596,7 @@ var doltStatusCmd = &cobra.Command{
 
 var mergeCmd = &cobra.Command{
 	Use:   "merge",
-	Short: "Manually merge all pending worker branches into main",
+	Short: "Manually merge all pending worker branches",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		loomDir, err := findLoomDir()
 		if err != nil {
@@ -584,11 +605,25 @@ var mergeCmd = &cobra.Command{
 		repoPath := filepath.Dir(loomDir)
 		beads := beadsclient.NewClient(repoPath, loomDir)
 
+		// Resolve target branch: CLI flag > config file > "main"
+		fileCfg := loadConfigFile(loomDir)
+		targetBranch := "main"
+		if fileCfg.MergeMode == "loom" {
+			targetBranch = fileCfg.MergeBranch
+			if targetBranch == "" {
+				targetBranch = "loom"
+			}
+		}
+		if cmd.Flags().Changed("branch") {
+			targetBranch, _ = cmd.Flags().GetString("branch")
+		}
+
 		m := &merger.Merger{
-			Beads:       beads,
-			RepoPath:    repoPath,
-			WorktreeDir: filepath.Join(loomDir, "worktrees"),
-			Logger:      log.Default(),
+			Beads:        beads,
+			RepoPath:     repoPath,
+			WorktreeDir:  filepath.Join(loomDir, "worktrees"),
+			TargetBranch: targetBranch,
+			Logger:       log.Default(),
 		}
 
 		merged, dropped, err := m.MergeAll()
@@ -890,4 +925,23 @@ func defaultStr(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// --- config file ---
+
+// loomConfig holds persistent settings from .loom/config.json.
+type loomConfig struct {
+	MergeMode   string `json:"merge_mode"`
+	MergeBranch string `json:"merge_branch"`
+}
+
+// loadConfigFile reads .loom/config.json. Returns zero-value if missing or invalid.
+func loadConfigFile(loomDir string) loomConfig {
+	var cfg loomConfig
+	data, err := os.ReadFile(filepath.Join(loomDir, "config.json"))
+	if err != nil {
+		return cfg
+	}
+	json.Unmarshal(data, &cfg)
+	return cfg
 }

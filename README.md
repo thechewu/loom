@@ -131,6 +131,37 @@ Flags:
 - `--agent CMD` -- agent command (default `claude`). Supported agents: `claude`, `kiro-cli`, or any custom command
 - `--agent-args` -- extra args passed to the agent
 - `--max-depth N` -- max recursion depth for subtask decomposition (default `3`)
+- `--merge-mode MODE` -- merge behavior: `main` (default), `loom`, or `none`
+- `--merge-branch NAME` -- target branch for `loom` merge mode (default `loom`)
+
+### Merge modes
+
+Control how (or whether) completed work gets merged:
+
+```bash
+# Default: auto-merge task branches into main
+loom run --merge-mode main
+
+# Merge into a staging branch — you merge to main when ready
+loom run --merge-mode loom
+loom run --merge-mode loom --merge-branch develop  # custom branch name
+
+# No merging — task branches stay open for manual merge or PR review
+loom run --merge-mode none
+```
+
+In **loom** mode, the target branch is auto-created from main if it doesn't exist. In **none** mode, the merger doesn't run — items stay in `pending-merge` state until you run `loom merge` manually.
+
+These settings can be persisted in `.loom/config.json` so you don't need to repeat flags:
+
+```json
+{
+  "merge_mode": "loom",
+  "merge_branch": "loom"
+}
+```
+
+CLI flags override config file values.
 
 ### Using with different agents
 
@@ -172,7 +203,8 @@ loom dashboard           # live terminal dashboard (auto-refreshes every 2s)
 Merge all pending branches without running the full supervisor:
 
 ```bash
-loom merge
+loom merge                   # merge into main (or config file default)
+loom merge --branch loom     # merge into a specific branch
 ```
 
 ### Claude CLI integration

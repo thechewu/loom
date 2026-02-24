@@ -62,6 +62,19 @@ pkg/prompt/prompt.go           Canonical CLAUDE.md snippet injected into project
 | `loom prompt` | Print CLAUDE.md snippet |
 | `loom dolt start/stop/status` | Manage Dolt server |
 
+## Configuration
+
+Settings can be persisted in `.loom/config.json` (CLI flags override file values):
+
+```json
+{
+  "merge_mode": "loom",
+  "merge_branch": "loom"
+}
+```
+
+Merge modes: `main` (auto-merge to main), `loom` (merge to staging branch), `none` (no merging, branches stay open).
+
 ## Dependencies
 
 - Go 1.25+, Git, Dolt, bd (beads CLI), Claude CLI

@@ -1,6 +1,6 @@
 // Package merger polls for pending-merge work items and merges their
-// worktree branches into the main branch. On conflict, it spawns an
-// agent to resolve. If resolution fails, changes are dropped.
+// worktree branches into a configurable target branch. On conflict, it
+// spawns an agent to resolve. If resolution fails, changes are dropped.
 package merger
 
 import (
@@ -16,7 +16,7 @@ import (
 	"github.com/thechewu/loom/pkg/beadsclient"
 )
 
-// Merger polls for pending-merge items and merges their branches into main.
+// Merger polls for pending-merge items and merges their branches into a target branch.
 type Merger struct {
 	Beads        *beadsclient.Client
 	RepoPath     string        // main repo path
@@ -24,12 +24,28 @@ type Merger struct {
 	PollInterval time.Duration
 	AgentCmd     string        // agent command for conflict resolution (e.g. "claude")
 	AgentArgs    []string      // extra agent args
+	TargetBranch string        // branch to merge into ("main", "loom", etc.)
 	Logger       *log.Logger
+}
+
+// targetBranch returns the configured target branch, defaulting to "main".
+func (m *Merger) targetBranch() string {
+	if m.TargetBranch == "" {
+		return "main"
+	}
+	return m.TargetBranch
 }
 
 // Run starts the merger poll loop. It blocks until ctx is cancelled.
 func (m *Merger) Run(ctx context.Context) error {
-	m.Logger.Printf("merger started: repo=%s poll=%s", m.RepoPath, m.PollInterval)
+	m.Logger.Printf("merger started: repo=%s target=%s poll=%s", m.RepoPath, m.targetBranch(), m.PollInterval)
+
+	// Ensure target branch exists (for non-main targets, create from main if missing)
+	if m.targetBranch() != "main" {
+		if err := m.ensureTargetBranch(); err != nil {
+			return fmt.Errorf("ensure target branch: %w", err)
+		}
+	}
 
 	ticker := time.NewTicker(m.PollInterval)
 	defer ticker.Stop()
@@ -75,14 +91,14 @@ func (m *Merger) poll() {
 	}
 }
 
-// mergeOne attempts to merge a task branch into main.
+// mergeOne attempts to merge a task branch into the target branch.
 // On conflict, spawns an agent to resolve. If that fails, drops the changes.
 func (m *Merger) mergeOne(item beadsclient.Issue) bool {
 	branch := "loom/" + item.ID
-	m.Logger.Printf("merging %s (branch %s) into main", item.ID, branch)
+	m.Logger.Printf("merging %s (branch %s) into %s", item.ID, branch, m.targetBranch())
 
 	// Phase 1: Pre-merge validation
-	if !m.ensureCleanMain(item.ID) {
+	if !m.ensureCleanTarget(item.ID) {
 		return false
 	}
 	if !m.validateBranch(item.ID, branch) {
@@ -112,7 +128,7 @@ func (m *Merger) mergeOne(item beadsclient.Issue) bool {
 	return false
 }
 
-// validateBranch checks the branch exists, has commits ahead of main, and isn't already merged.
+// validateBranch checks the branch exists, has commits ahead of the target, and isn't already merged.
 func (m *Merger) validateBranch(beadID, branch string) bool {
 	// Branch exists
 	if err := m.gitRun("rev-parse", "--verify", branch); err != nil {
@@ -121,22 +137,22 @@ func (m *Merger) validateBranch(beadID, branch string) bool {
 		return false
 	}
 
-	// Has commits ahead of main
-	out, err := m.gitOutput("log", "main.."+branch, "--oneline")
+	// Has commits ahead of target
+	out, err := m.gitOutput("log", m.targetBranch()+".."+branch, "--oneline")
 	if err != nil {
 		m.Logger.Printf("merger: check commits %s: %v", branch, err)
 		return false
 	}
 	if out == "" {
-		m.Logger.Printf("merger: branch %s has no commits ahead of main, skipping %s", branch, beadID)
+		m.Logger.Printf("merger: branch %s has no commits ahead of %s, skipping %s", branch, m.targetBranch(), beadID)
 		m.Beads.MarkMerged(beadID)
 		m.deleteBranch(branch)
 		return false
 	}
 
-	// Not already merged into main
-	if err := m.gitRun("merge-base", "--is-ancestor", branch, "main"); err == nil {
-		m.Logger.Printf("merger: branch %s already merged into main, skipping %s", branch, beadID)
+	// Not already merged into target
+	if err := m.gitRun("merge-base", "--is-ancestor", branch, m.targetBranch()); err == nil {
+		m.Logger.Printf("merger: branch %s already merged into %s, skipping %s", branch, m.targetBranch(), beadID)
 		m.Beads.MarkMerged(beadID)
 		m.deleteBranch(branch)
 		return false
@@ -145,10 +161,10 @@ func (m *Merger) validateBranch(beadID, branch string) bool {
 	return true
 }
 
-// ensureCleanMain checks out main and verifies a clean working tree.
-func (m *Merger) ensureCleanMain(beadID string) bool {
-	if err := m.gitRun("checkout", "main"); err != nil {
-		m.Logger.Printf("merger: checkout main failed: %v — will retry %s next poll", err, beadID)
+// ensureCleanTarget checks out the target branch and verifies a clean working tree.
+func (m *Merger) ensureCleanTarget(beadID string) bool {
+	if err := m.gitRun("checkout", m.targetBranch()); err != nil {
+		m.Logger.Printf("merger: checkout %s failed: %v — will retry %s next poll", m.targetBranch(), err, beadID)
 		return false
 	}
 
@@ -158,11 +174,21 @@ func (m *Merger) ensureCleanMain(beadID string) bool {
 		return false
 	}
 	if out != "" {
-		m.Logger.Printf("merger: main has uncommitted changes, will retry %s next poll:\n%s", beadID, out)
+		m.Logger.Printf("merger: %s has uncommitted changes, will retry %s next poll:\n%s", m.targetBranch(), beadID, out)
 		return false
 	}
 
 	return true
+}
+
+// ensureTargetBranch creates the target branch from main if it doesn't exist.
+func (m *Merger) ensureTargetBranch() error {
+	target := m.targetBranch()
+	if err := m.gitRun("rev-parse", "--verify", target); err != nil {
+		m.Logger.Printf("merger: creating branch %s from main", target)
+		return m.gitRun("branch", target, "main")
+	}
+	return nil
 }
 
 // attemptMerge does a dry-run merge to detect conflicts, then commits if clean.
