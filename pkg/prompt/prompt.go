@@ -20,13 +20,14 @@ loom worker list                                                           # wor
 
 Worker agents start with **zero context** from this session. The ` + "`-d`" + ` description is the agent's entire prompt. Every description must be fully self-contained:
 
-- **Name specific files and line numbers** when relevant
-- **Describe the expected behavior**, not just "fix the bug"
-- **Include constraints**: "Do not change any logic, just add type annotations"
+- **Exact file paths**: specify which files to create or modify
+- **Complete code context**: include import statements, constructor signatures, and data structures the agent will need
+- **Specific test cases**: describe expected behavior with concrete inputs and outputs
+- **Constraints**: "Do not change any logic, just add type annotations"
 - **One concern per task**: keep tasks scoped to avoid merge conflicts between workers
 
-Bad: "Fix the issue we discussed"
-Good: "In strategies.py, the stop_loss calculation on line 84 uses a hardcoded 0.1 multiplier. Change it to read from the atr_multiplier parameter passed to the constructor."
+Bad: "Add a caching layer to the API client"
+Good: "Create src/cache.py with a class DiskCache that wraps requests. Constructor takes cache_dir: str and ttl_seconds: int = 3600. Method get(url: str) -> Optional[Response] checks for a cached JSON file at cache_dir/<url_hash>.json, returns None if missing or expired. Method set(url: str, response: Response) writes the JSON. Add tests in tests/test_cache.py covering: cache miss returns None, cache hit returns stored response, expired entry returns None."
 
 ### Avoiding Merge Conflicts
 
