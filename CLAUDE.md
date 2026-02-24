@@ -24,7 +24,8 @@ pkg/supervisor/supervisor.go   Supervisor loop: polls beads for pending work, as
 pkg/worker/pool.go             Worker pool: creates git worktrees, spawns `claude -p`
                                processes, commits changes on completion, retries on failure.
 pkg/merger/merger.go           Merger: polls for pending-merge items, merges task branches
-                               (loom/<bead-id>) into main. Drops conflicting merges.
+                               (loom/<bead-id>) into main. Spawns agent to resolve conflicts;
+                               drops changes only if resolution fails.
 pkg/beadsclient/client.go      Beads CLI wrapper: CRUD for work items and worker state,
                                retry tracking via RequeueOrFail.
 pkg/beadsclient/dolt.go        Dolt server lifecycle (start/stop/status/init).
@@ -35,7 +36,7 @@ pkg/prompt/prompt.go           Canonical CLAUDE.md snippet injected into project
 
 ## Key Design Decisions
 
-- **Throughput over preservation**: If a merge conflicts, changes are dropped and the item is marked done. This keeps the pipeline moving.
+- **Conflict resolution before dropping**: If a merge conflicts, the merger spawns an agent to resolve conflict markers. If resolution fails, changes are dropped and the item is marked done. This keeps the pipeline moving.
 - **Beads as state store**: All work items and worker state live in beads (Dolt-backed). No in-memory state survives restarts.
 - **One worktree per worker**: Each agent gets full repo isolation via `git worktree add`.
 - **Branches per task, not per worker**: Branches are named `loom/<bead-id>` so they survive worker reassignment. Prevents the race where a recycled worker destroys a pending-merge branch.

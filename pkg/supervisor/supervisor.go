@@ -77,6 +77,8 @@ func New(cfg Config) (*Supervisor, error) {
 		RepoPath:     cfg.RepoPath,
 		WorktreeDir:  worktreeDir,
 		PollInterval: cfg.PollInterval,
+		AgentCmd:     cfg.AgentCmd,
+		AgentArgs:    cfg.AgentArgs,
 		Logger:       log.Default(),
 	}
 

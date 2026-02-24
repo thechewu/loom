@@ -1,19 +1,30 @@
 # Loom
 
-Lightweight multi-agent orchestration for Git repos. Loom spawns parallel Claude agents in isolated git worktrees, commits their changes, and merges results back to main.
+Lightweight multi-agent orchestration for Git repos. Loom spawns parallel AI agents in isolated git worktrees, commits their changes, and merges results back to main. Works with Claude CLI, Kiro CLI, or any agent that accepts a prompt.
 
 ## How It Works
 
-```
-loom queue add -t "task title" -d "what the agent should do"
-loom run --workers 4
+The ideal workflow is **agent-driven**: you talk to your AI CLI (Claude, Kiro, etc.) and it uses loom to parallelize work on your behalf. You don't manage the queue yourself — the agent reads the project's `CLAUDE.md`, discovers loom, breaks your request into independent tasks, queues them, and monitors progress.
 
-Worker 1 claims task → runs claude in worktree → commits changes → merger merges to main
-Worker 2 claims task → runs claude in worktree → commits changes → merger merges to main
-...
+```
+You: "Add unit tests for all the utility modules"
+
+Main agent (your CLI session):
+  ├── reads source files to understand the codebase
+  ├── loom queue add -t "Test utils/cache.py" -d "<detailed, self-contained prompt>"
+  ├── loom queue add -t "Test utils/auth.py"  -d "<detailed, self-contained prompt>"
+  ├── loom queue add -t "Test utils/parse.py" -d "<detailed, self-contained prompt>"
+  └── loom status  (monitors progress)
+
+Loom supervisor (background):
+  ├── Worker 1 claims task → runs agent in worktree → commits → merger merges to main
+  ├── Worker 2 claims task → runs agent in worktree → commits → merger merges to main
+  └── Worker 3 claims task → runs agent in worktree → commits → merger merges to main
 ```
 
-Each worker gets its own git worktree (isolated branch named `loom/<bead-id>`). When a worker finishes, its changes are committed and queued for merge. A merger runs alongside the supervisor and merges branches into main one at a time. If a merge conflicts, the changes are dropped and the item is marked done anyway -- throughput over preservation.
+`loom init` injects usage instructions into your project's `CLAUDE.md`, so any future CLI session automatically knows how to use loom — no manual onboarding needed.
+
+Each worker gets its own git worktree (isolated branch named `loom/<bead-id>`). When a worker finishes, its changes are committed and queued for merge. A merger runs alongside the supervisor and merges branches into main one at a time. If a merge conflicts, the merger spawns an agent to resolve the conflicts. If agent resolution fails, the changes are dropped and the item is marked done anyway.
 
 Failed tasks are automatically retried up to 3 times before being permanently marked as failed. Workers that produce no output for the stuck timeout duration (default 10m) are killed and their tasks requeued.
 
@@ -25,7 +36,7 @@ Failed tasks are automatically retried up to 3 times before being permanently ma
 | **Git** | Worktree management | https://git-scm.com/ |
 | **Dolt** | SQL database for beads state | https://docs.dolthub.com/introduction/installation |
 | **bd (beads CLI)** | Issue/work tracking | `go install github.com/steveyegge/gastown/cmd/bd@latest` |
-| **Claude CLI** | AI agent (workers run `claude -p`) | https://docs.anthropic.com/en/docs/claude-code |
+| **AI CLI** | Agent that workers run | [Claude CLI](https://docs.anthropic.com/en/docs/claude-code), [Kiro CLI](https://kiro.dev/cli/), or any CLI that accepts a prompt |
 
 ## Build
 
@@ -45,7 +56,7 @@ cd /path/to/your/git/repo
 loom init .
 ```
 
-This creates `.loom/` (workspace) and `.beads/` (issue database), starts a Dolt server, and appends loom usage instructions to the project's `CLAUDE.md` so that Claude CLI sessions automatically learn how to use loom.
+This creates `.loom/` (workspace) and `.beads/` (issue database), starts a Dolt server, and appends loom usage instructions to the project's `CLAUDE.md` so that AI CLI sessions automatically discover and use loom.
 
 ### 2. Add to .gitignore
 
@@ -55,7 +66,19 @@ echo -e ".loom/\n.beads/" >> .gitignore
 
 ## Usage
 
-### Queue work
+Start the supervisor in one terminal, then let your AI CLI session handle the rest. The agent reads `CLAUDE.md`, discovers loom, and queues tasks as needed.
+
+### 1. Start the supervisor (leave running)
+
+```bash
+loom run --workers 4 --repo .
+```
+
+### 2. Use your AI CLI normally
+
+In another terminal, start your CLI session (Claude, Kiro, etc.) and make requests as usual. The agent will use loom to parallelize independent tasks automatically.
+
+You can also queue work manually if needed:
 
 ```bash
 loom queue add -t "Short title" -d "Detailed description of what the agent should do"
@@ -67,15 +90,11 @@ The `-d` description is the agent's prompt -- be specific. Workers start with ze
 loom queue add -t "Critical fix" -d "..." -p 0
 ```
 
-### Run the supervisor
+### Supervisor details
 
-```bash
-loom run --workers 4 --repo .
-```
-
-This starts the supervisor (foreground) which:
+The supervisor (foreground process) handles:
 1. Polls for pending work items
-2. Spawns Claude agents in git worktrees
+2. Spawns AI agents in git worktrees
 3. Monitors worker activity (kills stuck workers, retries failed tasks)
 4. Commits agent changes when done
 5. Merges branches into main
