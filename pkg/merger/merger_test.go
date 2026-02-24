@@ -5,6 +5,29 @@ import (
 	"testing"
 )
 
+func TestTargetBranch(t *testing.T) {
+	tests := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"empty defaults to main", "", "main"},
+		{"explicit main", "main", "main"},
+		{"loom branch", "loom", "loom"},
+		{"custom branch", "develop", "develop"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &Merger{TargetBranch: tt.target}
+			got := m.targetBranch()
+			if got != tt.want {
+				t.Errorf("targetBranch() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildMergeAgentArgs(t *testing.T) {
 	tests := []struct {
 		name      string
