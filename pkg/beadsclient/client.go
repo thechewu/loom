@@ -118,6 +118,7 @@ type Issue struct {
 	UpdatedAt   string   `json:"updated_at"`
 	Assignee    string   `json:"assignee,omitempty"`
 	Labels      []string `json:"labels,omitempty"`
+	CloseReason string   `json:"close_reason,omitempty"`
 }
 
 // HasLabel returns true if the issue has the given label.

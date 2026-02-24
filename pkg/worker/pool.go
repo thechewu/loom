@@ -41,6 +41,7 @@ type runningWorker struct {
 	StartedAt      time.Time
 	LastOutputSize int64
 	LastOutputAt   time.Time
+	exited         bool // set by waitForCompletion; health check skips these
 }
 
 // NewPool creates a worker pool.
@@ -199,6 +200,14 @@ func (p *Pool) waitForCompletion(rw *runningWorker, outFile *os.File) {
 	err := rw.Cmd.Wait()
 	outFile.Close()
 
+	// Mark exited immediately so health checks don't race with post-exit
+	// processing (commit, bead updates). Without this, a supervisor tick
+	// between Wait() returning and delete(p.workers) can see the process
+	// as dead and requeue the item while we're still committing it.
+	p.mu.Lock()
+	rw.exited = true
+	p.mu.Unlock()
+
 	result := ""
 	resultPath := filepath.Join(rw.WorkDir, ".loom-agent", "result.txt")
 	if data, readErr := os.ReadFile(resultPath); readErr == nil {
@@ -247,6 +256,15 @@ func (p *Pool) waitForCompletion(rw *runningWorker, outFile *os.File) {
 			removeWorktree(p.RepoPath, rw.WorkDir)
 		} else {
 			// No changes to merge — complete immediately and clean up
+			comment := "Completed: no file changes"
+			if len(result) > 0 {
+				excerpt := result
+				if len(excerpt) > 200 {
+					excerpt = excerpt[:200] + "..."
+				}
+				comment += "\n" + excerpt
+			}
+			p.Beads.AddComment(rw.BeadID, comment)
 			p.Beads.CompleteWork(rw.BeadID, result)
 			p.Beads.UpdateWorkerBead(rw.Name, &beadsclient.WorkerFields{
 				AgentState:    "idle",
@@ -318,27 +336,29 @@ func (p *Pool) HealthCheck() map[string]string {
 
 	result := make(map[string]string, len(names))
 	for _, name := range names {
-		// Re-check under lock — worker may have been removed by waitForCompletion
+		// Re-check under lock — worker may have been removed or exited
 		p.mu.Lock()
-		_, stillExists := p.workers[name]
+		rw, stillExists := p.workers[name]
+		completing := stillExists && rw.exited
 		p.mu.Unlock()
-		if !stillExists {
-			continue // already cleaned up, skip
+		if !stillExists || completing {
+			continue // cleaned up or waitForCompletion is handling it
 		}
 
 		if p.IsAlive(name) {
 			result[name] = "working"
 			p.Beads.HeartbeatWorker(name)
 		} else {
-			// Wait briefly for waitForCompletion goroutine to clean up
+			// Wait briefly for waitForCompletion goroutine to set exited flag
 			time.Sleep(500 * time.Millisecond)
 			p.mu.Lock()
-			_, finalCheck := p.workers[name]
+			rw, finalCheck := p.workers[name]
+			exited := finalCheck && rw.exited
 			p.mu.Unlock()
-			if finalCheck {
+			if finalCheck && !exited {
 				result[name] = "dead"
 			}
-			// else: already cleaned up by waitForCompletion, not dead
+			// else: waitForCompletion is handling it or already cleaned up
 		}
 	}
 	return result
@@ -398,8 +418,9 @@ func (p *Pool) CheckActivity() map[string]time.Duration {
 	for _, name := range names {
 		p.mu.Lock()
 		rw, exists := p.workers[name]
+		completing := exists && rw.exited
 		p.mu.Unlock()
-		if !exists {
+		if !exists || completing {
 			continue
 		}
 

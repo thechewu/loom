@@ -222,6 +222,43 @@ Recursion depth is capped by `--max-depth` (default 3). Workers at the depth lim
 
 Branches are named per-task (`loom/lm-xxx`), not per-worker. This prevents a race condition where a worker being reassigned would destroy the previous task's branch before the merger could merge it.
 
+## External Integrations
+
+The supervisor is a long-lived daemon that continuously polls for new work. Any external system that creates beads with the right labels will have its tasks automatically picked up, worked on, and merged — no human in the loop.
+
+### Requirements
+
+A bead must have these fields for the supervisor to claim it:
+
+| Field | Value |
+|---|---|
+| Status | `open` |
+| Type | `work` |
+| Labels | `loom:work`, `loom:pending`, `loom:ws:<workspace>` |
+| Title | Short task title |
+| Description | Self-contained agent prompt |
+
+The workspace name is the git repo directory name (e.g., `my-project`). You can verify it with `loom status`.
+
+### Example: Jira → Loom
+
+A webhook or polling script watches Jira for new issues and creates beads via the `bd` CLI:
+
+```bash
+bd create \
+  --title "PROJ-123: Add input validation to signup form" \
+  --description "Add server-side validation to app/controllers/signup.py..." \
+  --type work \
+  --priority 2 \
+  --label loom:work \
+  --label loom:pending \
+  --label "loom:ws:my-project"
+```
+
+The running supervisor picks this up on the next poll tick (default 5s), assigns it to an available worker, and the full pipeline runs: agent execution → commit → merge → audit trail on the bead.
+
+See [`samples/jira-sync.py`](samples/jira-sync.py) for a complete polling-based integration.
+
 ## Troubleshooting
 
 **Dolt server not running:** Run `loom dolt start`. The server must be running before `loom run` or `loom queue add`.

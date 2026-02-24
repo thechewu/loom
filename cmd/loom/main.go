@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -69,6 +70,8 @@ func init() {
 	runCmd.Flags().Int("max-depth", 3, "max recursion depth for subtask decomposition")
 
 	dashboardCmd.Flags().DurationP("refresh", "r", 2*time.Second, "refresh interval")
+
+	queueShowCmd.Flags().IntP("last", "n", 0, "show last N items with outcomes")
 
 	queueClearCmd.Flags().String("status", "", "only clear items with this status (pending, in_progress, done, failed, pending-merge)")
 }
@@ -215,42 +218,96 @@ var queueListCmd = &cobra.Command{
 }
 
 var queueShowCmd = &cobra.Command{
-	Use:   "show <bead-id>",
-	Short: "Show work item details including failure reasons",
-	Args:  cobra.ExactArgs(1),
+	Use:   "show [bead-id]",
+	Short: "Show work item details, or last N items with -n",
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		n, _ := cmd.Flags().GetInt("last")
+
+		if len(args) == 0 && n == 0 {
+			return fmt.Errorf("provide a bead ID or use -n to show last N items")
+		}
+
 		beads, err := openBeads()
 		if err != nil {
 			return err
 		}
 
-		issue, err := beads.GetIssue(args[0])
-		if err != nil {
-			return err
+		// -n mode: show last N items as a summary table
+		if n > 0 {
+			return showLastN(beads, n)
 		}
 
-		fmt.Printf("ID:       %s\n", issue.ID)
-		fmt.Printf("Title:    %s\n", issue.Title)
-		fmt.Printf("Status:   %s\n", effectiveStatus(*issue))
-		fmt.Printf("Priority: %d\n", issue.Priority)
-		fmt.Printf("Assignee: %s\n", defaultStr(issue.Assignee, "-"))
-		fmt.Printf("Labels:   %s\n", strings.Join(issue.Labels, ", "))
-		fmt.Printf("Created:  %s\n", issue.CreatedAt)
-		fmt.Printf("Updated:  %s\n", issue.UpdatedAt)
-		if issue.Description != "" {
-			fmt.Printf("\n--- Description ---\n%s\n", issue.Description)
-		}
-
-		// Show comments (contains failure reasons and requeue history)
-		comments, err := beads.GetComments(args[0])
-		if err == nil && len(comments) > 0 {
-			fmt.Printf("\n--- History ---\n")
-			for _, c := range comments {
-				fmt.Println(c)
-			}
-		}
-		return nil
+		// Single-item detail mode
+		return showOne(beads, args[0])
 	},
+}
+
+func showOne(beads *beadsclient.Client, id string) error {
+	issue, err := beads.GetIssue(id)
+	if err != nil {
+		return err
+	}
+
+	// Fetch comments early so resolveOutcome can use them
+	comments, _ := beads.GetComments(id)
+
+	fmt.Printf("ID:       %s\n", issue.ID)
+	fmt.Printf("Title:    %s\n", issue.Title)
+	fmt.Printf("Status:   %s\n", effectiveStatus(*issue))
+	fmt.Printf("Outcome:  %s\n", resolveOutcome(*issue, comments))
+	fmt.Printf("Priority: %d\n", issue.Priority)
+	fmt.Printf("Assignee: %s\n", defaultStr(issue.Assignee, "-"))
+	fmt.Printf("Created:  %s\n", issue.CreatedAt)
+	fmt.Printf("Updated:  %s\n", issue.UpdatedAt)
+	if issue.Description != "" {
+		fmt.Printf("\n--- Description ---\n%s\n", issue.Description)
+	}
+
+	// Show comments (contains failure reasons, requeue history, audit trail)
+	if len(comments) > 0 {
+		fmt.Printf("\n--- History ---\n")
+		for _, c := range comments {
+			fmt.Println(c)
+		}
+	}
+
+	// Show agent output (close_reason) if present
+	if issue.CloseReason != "" {
+		fmt.Printf("\n--- Result ---\n%s\n", issue.CloseReason)
+	}
+	return nil
+}
+
+func showLastN(beads *beadsclient.Client, n int) error {
+	items, err := beads.ListAllWork()
+	if err != nil {
+		return err
+	}
+	if len(items) == 0 {
+		fmt.Println("queue is empty")
+		return nil
+	}
+
+	// Sort by created_at descending (most recent first)
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt > items[j].CreatedAt
+	})
+
+	if n > len(items) {
+		n = len(items)
+	}
+	items = items[:n]
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "BEAD ID\tTITLE\tOUTCOME")
+	for _, it := range items {
+		comments, _ := beads.GetComments(it.ID)
+		outcome := resolveOutcome(it, comments)
+		fmt.Fprintf(w, "%s\t%s\t%s\n", it.ID, truncate(it.Title, 40), outcome)
+	}
+	w.Flush()
+	return nil
 }
 
 var queueClearCmd = &cobra.Command{
@@ -738,6 +795,87 @@ func effectiveStatus(issue beadsclient.Issue) string {
 		return "pending"
 	}
 	return issue.Status
+}
+
+// resolveOutcome synthesizes a human-readable outcome from the issue's labels,
+// comments, and close reason. This answers "what happened?" at a glance.
+func resolveOutcome(issue beadsclient.Issue, comments []string) string {
+	commentText := strings.Join(comments, "\n")
+
+	if issue.HasLabel(beadsclient.LabelFailed) {
+		for _, c := range comments {
+			if strings.Contains(c, "merge conflict") {
+				return "merge dropped — " + extractAfter(c, "Failed: ")
+			}
+			if strings.Contains(c, "branch") && strings.Contains(c, "does not exist") {
+				return "failed (branch missing)"
+			}
+			if strings.Contains(c, "exceeded") && strings.Contains(c, "retries") {
+				return "failed (retries exhausted)"
+			}
+			if strings.HasPrefix(c, "Failed: ") {
+				return "failed — " + strings.TrimPrefix(c, "Failed: ")
+			}
+		}
+		return "failed"
+	}
+
+	if issue.HasLabel(beadsclient.LabelPendingMerge) {
+		return "pending merge"
+	}
+
+	if issue.HasLabel(beadsclient.LabelDone) {
+		// Check for merge audit trail (new merger)
+		for _, c := range comments {
+			if strings.HasPrefix(c, "Merged:") {
+				return strings.TrimSpace(c)
+			}
+		}
+		// Check for no-changes completion
+		if strings.Contains(commentText, "no file changes") {
+			if issue.CloseReason != "" && containsSubtaskSignal(issue.CloseReason) {
+				return "completed (subtasks created — see result)"
+			}
+			if issue.CloseReason != "" {
+				return "completed (no changes needed — see result)"
+			}
+			return "completed (no changes needed)"
+		}
+		// Legacy path: merged via close_reason "merged"
+		if issue.CloseReason == "merged" {
+			return "merged"
+		}
+		// Has close_reason but no structured comment (legacy items)
+		if issue.CloseReason != "" {
+			return "completed — see result"
+		}
+		return "completed"
+	}
+
+	if issue.HasLabel(beadsclient.LabelPending) {
+		return "queued"
+	}
+
+	if issue.Status == "in_progress" {
+		return "in progress"
+	}
+
+	return issue.Status
+}
+
+func extractAfter(s, prefix string) string {
+	if i := strings.Index(s, prefix); i >= 0 {
+		return s[i+len(prefix):]
+	}
+	return s
+}
+
+// containsSubtaskSignal checks if the agent's output mentions creating subtasks.
+func containsSubtaskSignal(s string) bool {
+	lower := strings.ToLower(s)
+	return strings.Contains(lower, "loom queue add") ||
+		strings.Contains(lower, "subtask") ||
+		strings.Contains(lower, "sub-task")
 }
 
 func truncate(s string, max int) string {
