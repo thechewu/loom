@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/thechewu/loom/pkg/beadsclient"
 	"github.com/thechewu/loom/pkg/merger"
+	"github.com/thechewu/loom/pkg/prompt"
 	"github.com/thechewu/loom/pkg/supervisor"
 )
 
@@ -35,6 +37,7 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(doltCmd)
 	rootCmd.AddCommand(mergeCmd)
+	rootCmd.AddCommand(promptCmd)
 
 	queueCmd.AddCommand(queueAddCmd)
 	queueCmd.AddCommand(queueListCmd)
@@ -98,6 +101,14 @@ var initCmd = &cobra.Command{
 		beads := beadsclient.NewClient(dir, loomDir)
 		if err := beads.Init(); err != nil {
 			return fmt.Errorf("beads init: %w", err)
+		}
+
+		// Append loom section to CLAUDE.md
+		claudePath := filepath.Join(dir, "CLAUDE.md")
+		if err := injectClaudeMD(claudePath); err != nil {
+			fmt.Printf("warning: could not update CLAUDE.md: %v\n", err)
+		} else {
+			fmt.Println("updated CLAUDE.md with loom instructions")
 		}
 
 		fmt.Printf("loom workspace initialized at %s\n", loomDir)
@@ -390,7 +401,43 @@ var mergeCmd = &cobra.Command{
 	},
 }
 
+// --- prompt ---
+
+var promptCmd = &cobra.Command{
+	Use:   "prompt",
+	Short: "Print the CLAUDE.md snippet for teaching Claude about loom",
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Print(prompt.ClaudeMDSection)
+	},
+}
+
 // --- helpers ---
+
+func injectClaudeMD(path string) error {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// Don't duplicate if already present
+	if strings.Contains(string(existing), prompt.Sentinel) {
+		return nil
+	}
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	// Add a blank line separator if the file already has content
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n\n") {
+		f.WriteString("\n")
+	}
+
+	_, err = f.WriteString(prompt.ClaudeMDSection)
+	return err
+}
 
 func openBeads() (*beadsclient.Client, error) {
 	loomDir, err := findLoomDir()
