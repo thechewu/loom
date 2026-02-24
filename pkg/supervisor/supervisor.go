@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -142,6 +143,12 @@ func (sv *Supervisor) Run(ctx context.Context) error {
 		}
 	}
 
+	// Prune orphaned loom branches on startup
+	pruned := PruneOrphanedBranches(sv.Beads, sv.Pool.RepoPath, sv.Logger)
+	if pruned > 0 {
+		sv.Logger.Printf("pruned %d orphaned branch(es)", pruned)
+	}
+
 	sv.Logger.Printf("supervisor started: max_workers=%d poll=%s stuck_timeout=%s",
 		sv.Pool.MaxWorkers, sv.PollInterval, sv.StuckTimeout)
 
@@ -242,6 +249,73 @@ func (sv *Supervisor) assignWork() {
 			return // stop assigning this tick to avoid hot-looping
 		}
 	}
+}
+
+// --- prune ---
+
+// PruneOrphanedBranches deletes loom/* branches that have no corresponding
+// active bead. A branch is orphaned if:
+//   - No bead exists for the ID extracted from the branch name, OR
+//   - The bead exists but is already terminal (done or failed)
+//
+// Branches with active beads (pending, in_progress, pending-merge) are kept.
+func PruneOrphanedBranches(beads *beadsclient.Client, repoPath string, logger *log.Logger) int {
+	// List all loom/* branches
+	cmd := exec.Command("git", "branch", "--list", "loom/*")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	pruned := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		branch := strings.TrimSpace(line)
+		if branch == "" || !strings.HasPrefix(branch, "loom/") {
+			continue
+		}
+
+		// Extract bead ID: "loom/lm-abc" -> "lm-abc"
+		beadID := strings.TrimPrefix(branch, "loom/")
+
+		// Check if bead exists and is still active
+		issue, err := beads.GetIssue(beadID)
+		if err != nil {
+			// Bead doesn't exist — orphaned
+			logger.Printf("pruning orphaned branch %s (no bead found)", branch)
+			deleteBranch(repoPath, branch)
+			pruned++
+			continue
+		}
+
+		// Bead exists but is terminal — safe to clean up the branch
+		if issue.HasLabel(beadsclient.LabelDone) || issue.HasLabel(beadsclient.LabelFailed) {
+			logger.Printf("pruning branch %s (bead %s is %s)", branch, beadID, effectiveLabel(issue))
+			deleteBranch(repoPath, branch)
+			pruned++
+		}
+	}
+
+	// Clean up worktree refs for deleted branches
+	exec.Command("git", "worktree", "prune").Run()
+
+	return pruned
+}
+
+func deleteBranch(repoPath, branch string) {
+	cmd := exec.Command("git", "branch", "-D", branch)
+	cmd.Dir = repoPath
+	cmd.Run() // best-effort
+}
+
+func effectiveLabel(issue *beadsclient.Issue) string {
+	if issue.HasLabel(beadsclient.LabelDone) {
+		return "done"
+	}
+	if issue.HasLabel(beadsclient.LabelFailed) {
+		return "failed"
+	}
+	return issue.Status
 }
 
 // --- lockfile ---

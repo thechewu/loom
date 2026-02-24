@@ -44,6 +44,7 @@ func init() {
 	rootCmd.AddCommand(promptCmd)
 	rootCmd.AddCommand(logsCmd)
 	rootCmd.AddCommand(dashboardCmd)
+	rootCmd.AddCommand(pruneCmd)
 
 	queueCmd.AddCommand(queueAddCmd)
 	queueCmd.AddCommand(queueListCmd)
@@ -632,6 +633,25 @@ var mergeCmd = &cobra.Command{
 		}
 
 		fmt.Printf("merged=%d  dropped=%d\n", merged, dropped)
+		return nil
+	},
+}
+
+// --- prune ---
+
+var pruneCmd = &cobra.Command{
+	Use:   "prune",
+	Short: "Delete orphaned loom/* branches with no active bead",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		loomDir, err := findLoomDir()
+		if err != nil {
+			return err
+		}
+		repoPath := filepath.Dir(loomDir)
+		beads := beadsclient.NewClient(repoPath, loomDir)
+
+		pruned := supervisor.PruneOrphanedBranches(beads, repoPath, log.Default())
+		fmt.Printf("pruned %d branch(es)\n", pruned)
 		return nil
 	},
 }

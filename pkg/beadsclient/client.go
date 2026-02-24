@@ -353,6 +353,9 @@ func ParseWorkerDescription(desc string) *WorkerFields {
 }
 
 // CreateWorkerBead creates or updates a worker bead.
+// Worker names are generic (worker-1, etc.) and shared across workspaces in the
+// same Dolt database. When a bead already exists (e.g., from a different project),
+// we reopen it and update both the description and workspace label.
 func (c *Client) CreateWorkerBead(name string, fields *WorkerFields) error {
 	id := Prefix + "-" + name
 	desc := FormatWorkerDescription(fields)
@@ -367,8 +370,15 @@ func (c *Client) CreateWorkerBead(name string, fields *WorkerFields) error {
 		"--label", c.WorkspaceLabel(),
 	)
 	if err != nil {
-		// Duplicate key — bead exists, just update it
-		return c.UpdateWorkerBead(name, fields)
+		// Bead exists — reopen it if closed, update description and labels.
+		// The workspace label may be stale if this worker was last used by a
+		// different project sharing the same Dolt database.
+		c.run("bd", "update", id,
+			"--status", "open",
+			"--description", desc,
+			"--add-label", c.WorkspaceLabel(),
+		)
+		return nil
 	}
 	return nil
 }
