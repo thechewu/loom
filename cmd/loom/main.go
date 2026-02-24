@@ -49,6 +49,7 @@ func init() {
 	queueCmd.AddCommand(queueClearCmd)
 
 	workerCmd.AddCommand(workerListCmd)
+	workerCmd.AddCommand(workerClearCmd)
 
 	doltCmd.AddCommand(doltStartCmd)
 	doltCmd.AddCommand(doltStopCmd)
@@ -343,6 +344,42 @@ var workerListCmd = &cobra.Command{
 	},
 }
 
+var workerClearCmd = &cobra.Command{
+	Use:   "clear",
+	Short: "Close all worker beads (clears stale workers)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		beads, err := openBeads()
+		if err != nil {
+			return err
+		}
+
+		workers, err := beads.ListWorkers()
+		if err != nil {
+			return err
+		}
+
+		if len(workers) == 0 {
+			fmt.Println("no workers to clear")
+			return nil
+		}
+
+		closed := 0
+		for _, wk := range workers {
+			name := wk.Title
+			if len(name) > 8 && name[:8] == "Worker: " {
+				name = name[8:]
+			}
+			if err := beads.CloseWorkerBead(name); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to close %s: %v\n", name, err)
+			} else {
+				closed++
+			}
+		}
+		fmt.Printf("closed %d worker(s)\n", closed)
+		return nil
+	},
+}
+
 // --- run ---
 
 var runCmd = &cobra.Command{
@@ -627,11 +664,17 @@ func injectClaudeMD(path string) error {
 		return err
 	}
 
-	// Don't duplicate if already present
-	if strings.Contains(string(existing), prompt.Sentinel) {
-		return nil
+	content := string(existing)
+
+	// If already present, replace the existing section with the latest version
+	if idx := strings.Index(content, prompt.Sentinel); idx != -1 {
+		before := content[:idx]
+		// The section runs to the end of the file (it's always appended last)
+		updated := strings.TrimRight(before, "\n") + "\n\n" + prompt.ClaudeMDSection
+		return os.WriteFile(path, []byte(updated), 0o644)
 	}
 
+	// First time — append
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
@@ -639,7 +682,7 @@ func injectClaudeMD(path string) error {
 	defer f.Close()
 
 	// Add a blank line separator if the file already has content
-	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n\n") {
+	if len(existing) > 0 && !strings.HasSuffix(content, "\n\n") {
 		f.WriteString("\n")
 	}
 
@@ -658,6 +701,12 @@ func openBeads() (*beadsclient.Client, error) {
 }
 
 func findLoomDir() (string, error) {
+	// Workers propagate LOOM_DIR so agents can always find the workspace
+	if envDir := os.Getenv("LOOM_DIR"); envDir != "" {
+		if info, err := os.Stat(envDir); err == nil && info.IsDir() {
+			return envDir, nil
+		}
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err

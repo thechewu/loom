@@ -356,7 +356,7 @@ func (c *Client) CreateWorkerBead(name string, fields *WorkerFields) error {
 	id := Prefix + "-" + name
 	desc := FormatWorkerDescription(fields)
 
-	// Try to create with explicit ID
+	// Try to create; fall back to update if the bead already exists.
 	_, err := c.run("bd", "create", "--json",
 		"--id="+id,
 		"--title", "Worker: "+name,
@@ -364,10 +364,10 @@ func (c *Client) CreateWorkerBead(name string, fields *WorkerFields) error {
 		"--type", "worker",
 		"--label", LabelWorker,
 		"--label", c.WorkspaceLabel(),
-		"--force",
 	)
 	if err != nil {
-		return fmt.Errorf("create worker bead %s: %w", name, err)
+		// Duplicate key — bead exists, just update it
+		return c.UpdateWorkerBead(name, fields)
 	}
 	return nil
 }
@@ -417,6 +417,12 @@ func (c *Client) ListWorkers() ([]Issue, error) {
 func (c *Client) CloseWorkerBead(name string) error {
 	id := Prefix + "-" + name
 	_, err := c.run("bd", "close", id, "--reason", "reaped")
+	return err
+}
+
+// AddComment adds a comment to a bead.
+func (c *Client) AddComment(beadID, comment string) error {
+	_, err := c.run("bd", "comment", beadID, comment)
 	return err
 }
 

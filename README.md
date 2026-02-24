@@ -1,6 +1,6 @@
 # Loom
 
-Lightweight multi-agent orchestration for Git repos. Loom spawns parallel AI agents in isolated git worktrees, commits their changes, and merges results back to main. Works with Claude CLI, Kiro CLI, or any agent that accepts a prompt.
+Lightweight multi-agent orchestration for Git repos. Loom spawns parallel AI agents in isolated git worktrees, commits their changes, and merges results back to main. Workers can recursively decompose large tasks into subtasks that go back into the queue, enabling multi-level parallelism without upfront planning. Works with Claude CLI, Kiro CLI, or any agent that accepts a prompt.
 
 ## How It Works
 
@@ -24,7 +24,7 @@ Loom supervisor (background):
 
 `loom init` injects usage instructions into your project's `CLAUDE.md`, so any future CLI session automatically knows how to use loom — no manual onboarding needed.
 
-Each worker gets its own git worktree (isolated branch named `loom/<bead-id>`). When a worker finishes, its changes are committed and queued for merge. A merger runs alongside the supervisor and merges branches into main one at a time. If a merge conflicts, the merger spawns an agent to resolve the conflicts. If agent resolution fails, the changes are dropped and the item is marked done anyway.
+Each worker gets its own git worktree (isolated branch named `loom/<bead-id>`). When a worker finishes, its changes are committed and queued for merge. A merger runs alongside the supervisor and merges branches into main one at a time. Before merging, it validates the branch exists, has commits ahead of main, and isn't already merged. It uses a dry-run merge to detect conflicts before committing. After a successful merge, it records an audit trail on the bead (files changed, lines added/removed). If a merge conflicts, the merger spawns an agent to resolve the conflicts. If resolution fails, the changes are dropped and the conflicted files are recorded on the bead.
 
 Failed tasks are automatically retried up to 3 times before being permanently marked as failed. Workers that produce no output for the stuck timeout duration (default 10m) are killed and their tasks requeued.
 
@@ -66,25 +66,46 @@ echo -e ".loom/\n.beads/" >> .gitignore
 
 ## Usage
 
-Start the supervisor in one terminal, then let your AI CLI session handle the rest. The agent reads `CLAUDE.md`, discovers loom, and queues tasks as needed.
+The recommended workflow is to let your AI CLI handle everything — initialization, starting the supervisor, queuing tasks, and monitoring progress. The agent reads `CLAUDE.md`, discovers loom, and manages the full lifecycle. This works best because the agent can troubleshoot loom state (Dolt server down, stale worktrees, stuck items) without you switching terminals.
 
-### 1. Start the supervisor (leave running)
+### Agent-driven (recommended)
 
-```bash
-loom run --workers 4 --repo .
+Just talk to your AI CLI. After `loom init`, the injected `CLAUDE.md` instructions teach the agent how to start the supervisor, queue work, and monitor progress:
+
+```
+You: "Add unit tests for all the utility modules"
+
+Agent:
+  ├── loom init .                        (if not already initialized)
+  ├── loom dolt start                    (ensures Dolt is running)
+  ├── loom run --workers 4 &             (starts supervisor in background)
+  ├── loom queue add -t "..." -d "..."   (queues tasks)
+  ├── loom status                        (monitors progress, troubleshoots failures)
+  └── ...
 ```
 
-### 2. Use your AI CLI normally
-
-In another terminal, start your CLI session (Claude, Kiro, etc.) and make requests as usual. The agent will use loom to parallelize independent tasks automatically.
-
-You can also queue work manually if needed:
+If you want to watch progress live, open a second terminal for the dashboard:
 
 ```bash
+loom dashboard
+```
+
+### Manual
+
+You can also drive loom by hand. Start the supervisor in one terminal, run the dashboard in a second, and queue work from a third:
+
+```bash
+# Terminal 1: supervisor (leave running)
+loom run --workers 4 --repo .
+
+# Terminal 2: live dashboard
+loom dashboard
+
+# Terminal 3: queue work
 loom queue add -t "Short title" -d "Detailed description of what the agent should do"
 ```
 
-The `-d` description is the agent's prompt -- be specific. Workers start with zero context, so descriptions must be fully self-contained. Priority with `-p` (0=highest, 4=lowest, default 2):
+The `-d` description is the agent's prompt — be specific. Workers start with zero context, so descriptions must be fully self-contained. Priority with `-p` (0=highest, 4=lowest, default 2):
 
 ```bash
 loom queue add -t "Critical fix" -d "..." -p 0
@@ -178,7 +199,7 @@ The Dolt server runs independently -- it survives loom process exits. If you reb
 cmd/loom/main.go              CLI entry point (cobra commands)
 pkg/supervisor/                Supervisor loop: polls, assigns, health-checks, stuck detection
 pkg/worker/pool.go             Worker pool: spawns agents in worktrees, commits changes, retries
-pkg/merger/merger.go           Merger: merges task branches (loom/<bead-id>) into main
+pkg/merger/merger.go           Merger: validates, merges, and audits task branches (loom/<bead-id>) into main
 pkg/beadsclient/client.go      Beads wrapper: work items, worker state, retry tracking
 pkg/beadsclient/dolt.go        Dolt server lifecycle management
 pkg/prompt/prompt.go           CLAUDE.md snippet injected by `loom init`

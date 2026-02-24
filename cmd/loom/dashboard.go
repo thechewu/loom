@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -28,9 +29,33 @@ var dashboardCmd = &cobra.Command{
 		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
 		defer cancel()
 
-		// Initial render
-		fmt.Print("\033[2J\033[H")
-		fmt.Print(renderDashboard(beads))
+		// Enter alternate screen buffer + hide cursor
+		fmt.Print("\033[?1049h\033[?25l\033[2J")
+
+		// Ensure we restore terminal on exit
+		defer func() {
+			fmt.Print("\033[?25h\033[?1049l") // show cursor + leave alt screen
+		}()
+
+		printFrame := func() {
+			raw := renderDashboard(beads)
+			// Append clear-to-EOL on each line so shorter lines
+			// overwrite longer previous ones without artifacts.
+			lines := strings.Split(raw, "\n")
+			var frame strings.Builder
+			for i, line := range lines {
+				frame.WriteString(line)
+				frame.WriteString("\033[K") // clear to end of line
+				if i < len(lines)-1 {
+					frame.WriteByte('\n')
+				}
+			}
+			fmt.Print("\033[H")   // cursor home
+			fmt.Print(frame.String())
+			fmt.Print("\033[J")   // clear from cursor to end of screen
+		}
+
+		printFrame()
 
 		ticker := time.NewTicker(refresh)
 		defer ticker.Stop()
@@ -38,11 +63,9 @@ var dashboardCmd = &cobra.Command{
 		for {
 			select {
 			case <-ctx.Done():
-				fmt.Print("\033[0m") // reset colors
 				return nil
 			case <-ticker.C:
-				fmt.Print("\033[H") // cursor home (no clear — reduces flicker)
-				fmt.Print(renderDashboard(beads))
+				printFrame()
 			}
 		}
 	},
@@ -58,7 +81,6 @@ const (
 	colorCyan    = "\033[36m"
 	colorMagenta = "\033[35m"
 	colorWhite   = "\033[37m"
-	clearToEOL   = "\033[K"
 )
 
 func renderDashboard(beads *beadsclient.Client) string {
@@ -69,14 +91,14 @@ func renderDashboard(beads *beadsclient.Client) string {
 	// Header
 	header := fmt.Sprintf("%s%s  LOOM DASHBOARD%s  %s%s[%s]%s", colorBold, colorCyan, colorReset, colorDim, colorWhite, beads.Workspace, colorReset)
 	refreshed := fmt.Sprintf("%s%s refreshed %s%s", colorDim, colorWhite, now, colorReset)
-	fmt.Fprintf(&buf, "  %s          %s%s\n", header, refreshed, clearToEOL)
-	fmt.Fprintf(&buf, "  %s────────────────────────────────────────────────────────%s%s\n", colorDim, colorReset, clearToEOL)
-	fmt.Fprintf(&buf, "%s\n", clearToEOL)
+	fmt.Fprintf(&buf, "  %s          %s\n", header, refreshed)
+	fmt.Fprintf(&buf, "  %s────────────────────────────────────────────────────────────────────────────%s\n", colorDim, colorReset)
+	fmt.Fprintf(&buf, "\n")
 
 	// Progress section
 	ws, wsErr := beads.GetWorkSummary()
 	if wsErr != nil {
-		fmt.Fprintf(&buf, "  %sError: %v%s%s\n", colorRed, wsErr, colorReset, clearToEOL)
+		fmt.Fprintf(&buf, "  %sError: %v%s\n", colorRed, wsErr, colorReset)
 	} else {
 		completed := ws.Done + ws.Failed
 		bar := progressBar(completed, ws.Total, 30)
@@ -84,31 +106,30 @@ func renderDashboard(beads *beadsclient.Client) string {
 		if ws.Total > 0 {
 			pct = completed * 100 / ws.Total
 		}
-		fmt.Fprintf(&buf, "  %sProgress:%s %s %d/%d (%d%%)%s\n",
-			colorBold, colorReset, bar, completed, ws.Total, pct, clearToEOL)
+		fmt.Fprintf(&buf, "  %sProgress:%s %s %d/%d (%d%%)\n",
+			colorBold, colorReset, bar, completed, ws.Total, pct)
 
-		fmt.Fprintf(&buf, "  %sPending:%s %d  %sIn Progress:%s %d  %sPending Merge:%s %d  %sDone:%s %d  %sFailed:%s %d%s\n",
+		fmt.Fprintf(&buf, "  %sPending:%s %d  %sIn Progress:%s %d  %sPending Merge:%s %d  %sDone:%s %d  %sFailed:%s %d\n",
 			colorYellow, colorReset, ws.Pending,
 			colorCyan, colorReset, ws.InProgress,
 			colorMagenta, colorReset, ws.PendingMerge,
 			colorGreen, colorReset, ws.Done,
-			colorRed, colorReset, ws.Failed,
-			clearToEOL)
+			colorRed, colorReset, ws.Failed)
 	}
-	fmt.Fprintf(&buf, "%s\n", clearToEOL)
+	fmt.Fprintf(&buf, "\n")
 
 	// Workers section
-	fmt.Fprintf(&buf, "  %s%sWORKERS%s%s\n", colorBold, colorWhite, colorReset, clearToEOL)
+	fmt.Fprintf(&buf, "  %s%sWORKERS%s\n", colorBold, colorWhite, colorReset)
 
 	workers, wkErr := beads.ListWorkers()
 	if wkErr != nil {
-		fmt.Fprintf(&buf, "  %sError: %v%s%s\n", colorRed, wkErr, colorReset, clearToEOL)
+		fmt.Fprintf(&buf, "  %sError: %v%s\n", colorRed, wkErr, colorReset)
 	} else if len(workers) == 0 {
-		fmt.Fprintf(&buf, "  %s(no workers)%s%s\n", colorDim, colorReset, clearToEOL)
+		fmt.Fprintf(&buf, "  %s(no workers)%s\n", colorDim, colorReset)
 	} else {
 		var wbuf bytes.Buffer
 		w := tabwriter.NewWriter(&wbuf, 0, 4, 2, ' ', 0)
-		fmt.Fprintf(w, "  %sNAME\tSTATE\tCURRENT ITEM\tLAST SEEN%s\n", colorDim, colorReset)
+		fmt.Fprintf(w, "  %sNAME\tSTATE\tITEM\tLAST SEEN\tOUTPUT%s\n", colorDim, colorReset)
 		for _, wk := range workers {
 			fields := beadsclient.ParseWorkerDescription(wk.Description)
 			name := wk.Title
@@ -129,74 +150,166 @@ func renderDashboard(beads *beadsclient.Client) string {
 				stateColor = colorYellow
 			case "dead":
 				stateColor = colorRed
+			case "idle":
+				stateColor = colorDim
 			}
-			fmt.Fprintf(w, "  %s\t%s%s%s\t%s\t%s\n",
+
+			// Tail last output from the worker's result file
+			output := tailWorkerOutput(fields.WorkDir, 100)
+
+			fmt.Fprintf(w, "  %s\t%s%s%s\t%s\t%s\t%s%s%s\n",
 				name,
 				stateColor, fields.AgentState, colorReset,
 				defaultStr(fields.CurrentItem, "-"),
-				lastSeen)
+				lastSeen,
+				colorDim, output, colorReset)
 		}
 		w.Flush()
-		// Append clearToEOL to each line
 		for _, line := range strings.Split(strings.TrimRight(wbuf.String(), "\n"), "\n") {
-			fmt.Fprintf(&buf, "%s%s\n", line, clearToEOL)
+			fmt.Fprintf(&buf, "%s\n", line)
 		}
 	}
-	fmt.Fprintf(&buf, "%s\n", clearToEOL)
+	fmt.Fprintf(&buf, "\n")
 
-	// Queue section
-	fmt.Fprintf(&buf, "  %s%sQUEUE%s%s\n", colorBold, colorWhite, colorReset, clearToEOL)
+	// Queue section — only show active items (not done/failed)
+	fmt.Fprintf(&buf, "  %s%sQUEUE%s\n", colorBold, colorWhite, colorReset)
 
 	items, qErr := beads.ListAllWork()
 	if qErr != nil {
-		fmt.Fprintf(&buf, "  %sError: %v%s%s\n", colorRed, qErr, colorReset, clearToEOL)
-	} else if len(items) == 0 {
-		fmt.Fprintf(&buf, "  %s(empty)%s%s\n", colorDim, colorReset, clearToEOL)
+		fmt.Fprintf(&buf, "  %sError: %v%s\n", colorRed, qErr, colorReset)
 	} else {
-		// Sort: in_progress first, then pending, pending-merge, then done/failed
-		sort.Slice(items, func(i, j int) bool {
-			return statusOrder(items[i]) < statusOrder(items[j])
-		})
-
-		var qbuf bytes.Buffer
-		w := tabwriter.NewWriter(&qbuf, 0, 4, 2, ' ', 0)
-		fmt.Fprintf(w, "  %sID\tTITLE\tSTATUS\tPRI\tWORKER%s\n", colorDim, colorReset)
+		// Split into active and completed
+		var active, completed []beadsclient.Issue
 		for _, it := range items {
-			status := effectiveStatus(it)
-			assignee := defaultStr(it.Assignee, "-")
-			statusColor := colorDim
-			switch status {
-			case "in_progress":
-				statusColor = colorCyan
-			case "pending":
-				statusColor = colorYellow
-			case "pending-merge":
-				statusColor = colorMagenta
-			case "done":
-				statusColor = colorGreen
-			case "failed":
-				statusColor = colorRed
+			s := effectiveStatus(it)
+			if s == "done" || s == "failed" {
+				completed = append(completed, it)
+			} else {
+				active = append(active, it)
 			}
-			fmt.Fprintf(w, "  %s\t%s\t%s%s%s\t%d\t%s\n",
-				it.ID,
-				truncate(it.Title, 40),
-				statusColor, status, colorReset,
-				it.Priority,
-				assignee)
 		}
-		w.Flush()
-		for _, line := range strings.Split(strings.TrimRight(qbuf.String(), "\n"), "\n") {
-			fmt.Fprintf(&buf, "%s%s\n", line, clearToEOL)
-		}
-	}
-	fmt.Fprintf(&buf, "%s\n", clearToEOL)
 
-	// Clear any leftover lines from previous render
-	for i := 0; i < 10; i++ {
-		fmt.Fprintf(&buf, "%s\n", clearToEOL)
+		if len(active) == 0 && len(completed) == 0 {
+			fmt.Fprintf(&buf, "  %s(empty)%s\n", colorDim, colorReset)
+		} else {
+			// Sort active: in_progress first, then pending, pending-merge
+			sort.Slice(active, func(i, j int) bool {
+				return statusOrder(active[i]) < statusOrder(active[j])
+			})
+
+			var qbuf bytes.Buffer
+			w := tabwriter.NewWriter(&qbuf, 0, 4, 2, ' ', 0)
+			fmt.Fprintf(w, "  %sID\tTITLE\tSTATUS\tPRI\tWORKER%s\n", colorDim, colorReset)
+			for _, it := range active {
+				status := effectiveStatus(it)
+				assignee := defaultStr(it.Assignee, "-")
+				statusColor := colorDim
+				switch status {
+				case "in_progress":
+					statusColor = colorCyan
+				case "pending":
+					statusColor = colorYellow
+				case "pending-merge":
+					statusColor = colorMagenta
+				}
+				fmt.Fprintf(w, "  %s\t%s\t%s%s%s\t%d\t%s\n",
+					it.ID,
+					truncate(it.Title, 40),
+					statusColor, status, colorReset,
+					it.Priority,
+					assignee)
+			}
+			w.Flush()
+			for _, line := range strings.Split(strings.TrimRight(qbuf.String(), "\n"), "\n") {
+				fmt.Fprintf(&buf, "%s\n", line)
+			}
+
+			// Show completed count as a summary line
+			if len(completed) > 0 {
+				doneCount := 0
+				failedCount := 0
+				for _, it := range completed {
+					if effectiveStatus(it) == "failed" {
+						failedCount++
+					} else {
+						doneCount++
+					}
+				}
+				fmt.Fprintf(&buf, "  %s+ %d done, %d failed (hidden)%s\n", colorDim, doneCount, failedCount, colorReset)
+			}
+		}
 	}
+	fmt.Fprintf(&buf, "\n")
 
 	return buf.String()
+}
+
+// tailWorkerOutput reads the last maxLen bytes from a worker's result file.
+func tailWorkerOutput(workDir string, maxLen int) string {
+	if workDir == "" {
+		return "-"
+	}
+	resultPath := filepath.Join(workDir, ".loom-agent", "result.txt")
+	f, err := os.Open(resultPath)
+	if err != nil {
+		return "-"
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return "-"
+	}
+
+	// Read last maxLen bytes
+	offset := info.Size() - int64(maxLen)
+	if offset < 0 {
+		offset = 0
+	}
+	buf := make([]byte, int64(maxLen))
+	n, err := f.ReadAt(buf, offset)
+	if n == 0 {
+		return "-"
+	}
+
+	s := string(buf[:n])
+	// Clean up: collapse whitespace, remove control chars
+	s = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r < 32 {
+			return -1 // drop control chars
+		}
+		return r
+	}, s)
+	s = collapseSpaces(s)
+	s = strings.TrimSpace(s)
+
+	if len(s) > maxLen {
+		s = s[len(s)-maxLen:]
+	}
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+func collapseSpaces(s string) string {
+	var b strings.Builder
+	prevSpace := false
+	for _, r := range s {
+		if r == ' ' {
+			if !prevSpace {
+				b.WriteRune(r)
+			}
+			prevSpace = true
+		} else {
+			b.WriteRune(r)
+			prevSpace = false
+		}
+	}
+	return b.String()
 }
 
 func progressBar(done, total, width int) string {

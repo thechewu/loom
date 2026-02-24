@@ -93,8 +93,10 @@ func (p *Pool) Spawn(name string, item *beadsclient.Issue) error {
 		return fmt.Errorf("create worktree: %w", err)
 	}
 
-	// Write prompt and result files under .loom/ so they stay out of git
-	loomSubdir := filepath.Join(worktreePath, ".loom")
+	// Write prompt and result files under .loom-agent/ so they stay out of git
+	// (Must NOT be named ".loom" — findLoomDir() would match it and
+	//  agents running `loom queue add` would find the wrong workspace.)
+	loomSubdir := filepath.Join(worktreePath, ".loom-agent")
 	if err := os.MkdirAll(loomSubdir, 0o755); err != nil {
 		removeWorktree(p.RepoPath, worktreePath)
 		return fmt.Errorf("create .loom dir: %w", err)
@@ -121,6 +123,12 @@ func (p *Pool) Spawn(name string, item *beadsclient.Issue) error {
 		if strings.HasPrefix(e, "CLAUDECODE=") {
 			continue
 		}
+		// Prepend loom's own directory to PATH so workers can run `loom queue add`
+		if strings.HasPrefix(e, "PATH=") {
+			if self, err := os.Executable(); err == nil {
+				e = "PATH=" + filepath.Dir(self) + string(os.PathListSeparator) + e[5:]
+			}
+		}
 		cleanEnv = append(cleanEnv, e)
 	}
 	// Propagate recursion depth so subtasks know their level
@@ -131,6 +139,7 @@ func (p *Pool) Spawn(name string, item *beadsclient.Issue) error {
 	cleanEnv = append(cleanEnv,
 		"LOOM_WORKER="+name,
 		"LOOM_BEAD_ID="+item.ID,
+		"LOOM_DIR="+p.Beads.LoomDir,
 		fmt.Sprintf("LOOM_DEPTH=%d", currentDepth+1),
 		fmt.Sprintf("LOOM_MAX_DEPTH=%d", p.MaxDepth),
 	)
@@ -191,7 +200,7 @@ func (p *Pool) waitForCompletion(rw *runningWorker, outFile *os.File) {
 	outFile.Close()
 
 	result := ""
-	resultPath := filepath.Join(rw.WorkDir, ".loom", "result.txt")
+	resultPath := filepath.Join(rw.WorkDir, ".loom-agent", "result.txt")
 	if data, readErr := os.ReadFile(resultPath); readErr == nil {
 		result = string(data)
 		if len(result) > 4096 {
@@ -446,36 +455,58 @@ func buildAgentArgs(agentCmd string, extraArgs []string, prompt string) (string,
 // --- git commit helpers ---
 
 // commitWorktree stages all changes and commits them in the given worktree.
-// Returns true if changes were committed, false if the worktree was clean.
+// Returns true if changes were committed (or the agent committed its own),
+// false if the worktree is clean AND the branch has no new commits.
 func commitWorktree(worktreePath, message string) (bool, error) {
-	// Check if there are any changes (staged or unstaged)
+	// Check if there are any uncommitted changes (staged or unstaged)
+	hasUncommitted := false
 	check := exec.Command("git", "diff", "--quiet", "HEAD")
 	check.Dir = worktreePath
-	if err := check.Run(); err == nil {
+	if err := check.Run(); err != nil {
+		hasUncommitted = true
+	} else {
 		// diff --quiet exits 0 when clean; also check for untracked files
-		untracked := exec.Command("git", "ls-files", "--others", "--exclude-standard")
+		// (exclude .loom-agent/ which is loom's internal directory)
+		untracked := exec.Command("git", "ls-files", "--others", "--exclude-standard", "--exclude", ".loom-agent/")
 		untracked.Dir = worktreePath
 		out, _ := untracked.Output()
-		if len(strings.TrimSpace(string(out))) == 0 {
-			return false, nil // no changes at all
+		if len(strings.TrimSpace(string(out))) > 0 {
+			hasUncommitted = true
 		}
 	}
 
-	// Stage everything
-	add := exec.Command("git", "add", "-A")
-	add.Dir = worktreePath
-	if out, err := add.CombinedOutput(); err != nil {
-		return false, fmt.Errorf("git add: %s (%w)", strings.TrimSpace(string(out)), err)
+	if hasUncommitted {
+		// Stage everything except loom's internal agent files
+		add := exec.Command("git", "add", "-A", "--", ".", ":!.loom-agent")
+		add.Dir = worktreePath
+		if out, err := add.CombinedOutput(); err != nil {
+			return false, fmt.Errorf("git add: %s (%w)", strings.TrimSpace(string(out)), err)
+		}
+
+		// Check if anything was actually staged (the pathspec may have excluded all changes)
+		staged := exec.Command("git", "diff", "--cached", "--quiet")
+		staged.Dir = worktreePath
+		if err := staged.Run(); err != nil {
+			// Something staged — commit it
+			commit := exec.Command("git", "commit", "-m", message)
+			commit.Dir = worktreePath
+			if out, err := commit.CombinedOutput(); err != nil {
+				return false, fmt.Errorf("git commit: %s (%w)", strings.TrimSpace(string(out)), err)
+			}
+			return true, nil
+		}
 	}
 
-	// Commit
-	commit := exec.Command("git", "commit", "-m", message)
-	commit.Dir = worktreePath
-	if out, err := commit.CombinedOutput(); err != nil {
-		return false, fmt.Errorf("git commit: %s (%w)", strings.TrimSpace(string(out)), err)
+	// Working tree is clean. But the agent (running with --dangerously-skip-permissions)
+	// may have committed changes directly. Check if the branch is ahead of main.
+	ahead := exec.Command("git", "log", "main..HEAD", "--oneline")
+	ahead.Dir = worktreePath
+	out, _ := ahead.Output()
+	if len(strings.TrimSpace(string(out))) > 0 {
+		return true, nil // agent committed its own changes
 	}
 
-	return true, nil
+	return false, nil // truly no changes
 }
 
 // --- git worktree helpers ---

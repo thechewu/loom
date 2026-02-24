@@ -79,43 +79,202 @@ func (m *Merger) poll() {
 // On conflict, spawns an agent to resolve. If that fails, drops the changes.
 func (m *Merger) mergeOne(item beadsclient.Issue) bool {
 	branch := "loom/" + item.ID
-
 	m.Logger.Printf("merging %s (branch %s) into main", item.ID, branch)
 
-	// Ensure we're on main
-	if err := m.gitRun("checkout", "main"); err != nil {
-		// Transient git state issue — leave item in pending-merge for retry
-		m.Logger.Printf("merger: checkout main failed: %v — will retry %s next poll", err, item.ID)
+	// Phase 1: Pre-merge validation
+	if !m.ensureCleanMain(item.ID) {
+		return false
+	}
+	if !m.validateBranch(item.ID, branch) {
 		return false
 	}
 
-	// Attempt merge
-	mergeCmd := exec.Command("git", "merge", branch, "-m",
-		fmt.Sprintf("loom: merge %s (%s)", item.ID, item.Title))
-	mergeCmd.Dir = m.RepoPath
-	out, mergeErr := mergeCmd.CombinedOutput()
-
+	// Phase 2: Attempt merge (dry-run then real)
+	files, mergeErr := m.attemptMerge(item, branch)
 	if mergeErr == nil {
-		m.Logger.Printf("merged %s successfully", item.ID)
-		m.markMerged(item.ID, branch)
+		m.recordSuccess(item.ID, branch, files)
 		return true
 	}
 
-	// Merge conflicted — try agent resolution
+	// Phase 3: Conflict resolution
 	m.Logger.Printf("merger: conflict on %s, attempting agent resolution", item.ID)
-
 	if m.resolveConflicts(item) {
 		m.Logger.Printf("merger: agent resolved conflicts for %s", item.ID)
-		m.markMerged(item.ID, branch)
+		files = m.getMergedFiles()
+		m.recordSuccess(item.ID, branch, files)
 		return true
 	}
 
-	// Agent couldn't resolve — drop changes
-	m.Logger.Printf("merger: resolution failed for %s, dropping changes: %s",
-		item.ID, strings.TrimSpace(string(out)))
+	// Phase 4: Drop
+	conflicted := m.getConflictedFiles()
 	m.gitRun("merge", "--abort")
-	m.drop(item.ID, branch)
+	m.recordFailure(item.ID, branch, conflicted)
 	return false
+}
+
+// validateBranch checks the branch exists, has commits ahead of main, and isn't already merged.
+func (m *Merger) validateBranch(beadID, branch string) bool {
+	// Branch exists
+	if err := m.gitRun("rev-parse", "--verify", branch); err != nil {
+		m.Logger.Printf("merger: branch %s does not exist for %s", branch, beadID)
+		m.Beads.FailWork(beadID, fmt.Sprintf("branch %s does not exist", branch))
+		return false
+	}
+
+	// Has commits ahead of main
+	out, err := m.gitOutput("log", "main.."+branch, "--oneline")
+	if err != nil {
+		m.Logger.Printf("merger: check commits %s: %v", branch, err)
+		return false
+	}
+	if out == "" {
+		m.Logger.Printf("merger: branch %s has no commits ahead of main, skipping %s", branch, beadID)
+		m.Beads.MarkMerged(beadID)
+		m.deleteBranch(branch)
+		return false
+	}
+
+	// Not already merged into main
+	if err := m.gitRun("merge-base", "--is-ancestor", branch, "main"); err == nil {
+		m.Logger.Printf("merger: branch %s already merged into main, skipping %s", branch, beadID)
+		m.Beads.MarkMerged(beadID)
+		m.deleteBranch(branch)
+		return false
+	}
+
+	return true
+}
+
+// ensureCleanMain checks out main and verifies a clean working tree.
+func (m *Merger) ensureCleanMain(beadID string) bool {
+	if err := m.gitRun("checkout", "main"); err != nil {
+		m.Logger.Printf("merger: checkout main failed: %v — will retry %s next poll", err, beadID)
+		return false
+	}
+
+	out, err := m.gitOutput("status", "--porcelain")
+	if err != nil {
+		m.Logger.Printf("merger: git status failed: %v", err)
+		return false
+	}
+	if out != "" {
+		m.Logger.Printf("merger: main has uncommitted changes, will retry %s next poll:\n%s", beadID, out)
+		return false
+	}
+
+	return true
+}
+
+// attemptMerge does a dry-run merge to detect conflicts, then commits if clean.
+// On conflict, leaves the merge state in place for resolveConflicts and returns an error.
+func (m *Merger) attemptMerge(item beadsclient.Issue, branch string) ([]string, error) {
+	// Dry-run: merge without committing to detect conflicts
+	dryCmd := exec.Command("git", "merge", "--no-commit", "--no-ff", branch)
+	dryCmd.Dir = m.RepoPath
+	_, dryErr := dryCmd.CombinedOutput()
+
+	if dryErr != nil {
+		// Conflict — leave merge state in place for resolution
+		return nil, fmt.Errorf("merge conflict")
+	}
+
+	// Dry-run succeeded — capture file list, abort, then do real merge
+	files := m.getStagedFiles()
+	m.gitRun("merge", "--abort")
+
+	// Real merge with enriched commit message
+	commitMsg := fmt.Sprintf("loom: merge %s (%s)", item.ID, item.Title)
+	if len(files) > 0 {
+		commitMsg += "\n\nFiles: " + strings.Join(files, ", ")
+	}
+
+	mergeCmd := exec.Command("git", "merge", branch, "-m", commitMsg)
+	mergeCmd.Dir = m.RepoPath
+	out, mergeErr := mergeCmd.CombinedOutput()
+	if mergeErr != nil {
+		return nil, fmt.Errorf("merge failed: %s", strings.TrimSpace(string(out)))
+	}
+
+	return files, nil
+}
+
+// getStagedFiles returns files staged in the index (used during dry-run merge).
+func (m *Merger) getStagedFiles() []string {
+	out, err := m.gitOutput("diff", "--cached", "--name-only")
+	if err != nil || out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
+// getMergedFiles returns files changed in the most recent commit.
+func (m *Merger) getMergedFiles() []string {
+	out, err := m.gitOutput("diff", "HEAD~1", "--name-only")
+	if err != nil || out == "" {
+		return nil
+	}
+	return strings.Split(out, "\n")
+}
+
+// getDiffStats returns the total lines added and removed in the most recent commit.
+func (m *Merger) getDiffStats() (added, removed int) {
+	out, err := m.gitOutput("diff", "HEAD~1", "--numstat")
+	if err != nil {
+		return 0, 0
+	}
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			var a, r int
+			fmt.Sscanf(fields[0], "%d", &a)
+			fmt.Sscanf(fields[1], "%d", &r)
+			added += a
+			removed += r
+		}
+	}
+	return
+}
+
+// recordSuccess marks merged, enriches the commit message, deletes branch, and adds audit comment.
+func (m *Merger) recordSuccess(beadID, branch string, files []string) {
+	added, removed := m.getDiffStats()
+
+	// Enrich merge commit message with file list if not already present
+	if len(files) > 0 {
+		msg, err := m.gitOutput("log", "-1", "--format=%B")
+		if err == nil && !strings.Contains(msg, "Files:") {
+			enriched := strings.TrimSpace(msg) + "\n\nFiles: " + strings.Join(files, ", ")
+			m.gitRun("commit", "--amend", "-m", enriched)
+		}
+	}
+
+	// Add audit comment to the bead
+	comment := fmt.Sprintf("Merged: %d files changed (+%d, -%d)", len(files), added, removed)
+	if len(files) > 0 {
+		comment += ": " + strings.Join(files, ", ")
+	}
+	m.Logger.Printf("merger: %s %s", beadID, comment)
+	if err := m.Beads.AddComment(beadID, comment); err != nil {
+		m.Logger.Printf("merger: add comment %s: %v", beadID, err)
+	}
+
+	if err := m.Beads.MarkMerged(beadID); err != nil {
+		m.Logger.Printf("merger: mark merged %s: %v", beadID, err)
+	}
+	m.deleteBranch(branch)
+}
+
+// recordFailure marks failed, deletes branch, and adds audit comment with conflict details.
+func (m *Merger) recordFailure(beadID, branch string, conflicted []string) {
+	reason := "merge conflict — changes dropped"
+	if len(conflicted) > 0 {
+		reason = fmt.Sprintf("merge conflict in %s — changes dropped", strings.Join(conflicted, ", "))
+	}
+	m.Logger.Printf("merger: %s failed: %s", beadID, reason)
+	if err := m.Beads.FailWork(beadID, reason); err != nil {
+		m.Logger.Printf("merger: fail (drop) %s: %v", beadID, err)
+	}
+	m.deleteBranch(branch)
 }
 
 // resolveConflicts spawns an agent to resolve merge conflicts in the working tree.
@@ -183,7 +342,8 @@ func (m *Merger) resolveConflicts(item beadsclient.Issue) bool {
 		return false
 	}
 
-	commitCmd := exec.Command("git", "commit", "--no-edit")
+	commitMsg := fmt.Sprintf("loom: merge %s (%s)", item.ID, item.Title)
+	commitCmd := exec.Command("git", "commit", "-m", commitMsg)
 	commitCmd.Dir = m.RepoPath
 	if out, err := commitCmd.CombinedOutput(); err != nil {
 		m.Logger.Printf("merger: commit after resolve failed: %s (%v)",
@@ -232,22 +392,6 @@ func buildMergeAgentArgs(agentCmd string, extraArgs []string, prompt string) (st
 	return agentCmd, args
 }
 
-// markMerged marks a work item as successfully merged and cleans up its branch.
-func (m *Merger) markMerged(beadID, branch string) {
-	if err := m.Beads.MarkMerged(beadID); err != nil {
-		m.Logger.Printf("merger: mark merged %s: %v", beadID, err)
-	}
-	m.deleteBranch(branch)
-}
-
-// drop marks a work item as done (changes dropped) and cleans up its branch.
-func (m *Merger) drop(beadID, branch string) {
-	if err := m.Beads.CompleteWork(beadID, "merge conflict — changes dropped"); err != nil {
-		m.Logger.Printf("merger: complete (drop) %s: %v", beadID, err)
-	}
-	m.deleteBranch(branch)
-}
-
 func (m *Merger) deleteBranch(branch string) {
 	cmd := exec.Command("git", "branch", "-D", branch)
 	cmd.Dir = m.RepoPath
@@ -262,4 +406,15 @@ func (m *Merger) gitRun(args ...string) error {
 		return fmt.Errorf("git %s: %s (%w)", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// gitOutput runs a git command and returns its trimmed stdout.
+func (m *Merger) gitOutput(args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = m.RepoPath
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %s (%w)", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }

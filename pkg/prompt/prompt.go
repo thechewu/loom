@@ -23,17 +23,31 @@ Do the work directly when:
 
 Workers are executors, not thinkers. They follow a spec — they don't explore, investigate, or make design decisions. If the task requires understanding the problem before solving it, do it directly.
 
+### Setup & Lifecycle
+
+Before queuing work, ensure loom is initialized and running:
+
+` + "```" + `bash
+loom init .                                    # initialize workspace (creates .loom/, .beads/, starts Dolt, injects CLAUDE.md)
+loom dolt start                                # ensure Dolt server is running (survives process exits, restart after reboot)
+loom run --workers 4 --repo . &                # start supervisor in background (polls for work, spawns agents, merges results)
+` + "```" + `
+
+If ` + "`loom init`" + ` was already run, just ensure Dolt is up and the supervisor is running. If ` + "`loom run`" + ` fails with "loom is already running", a supervisor is already active — just queue work.
+
 ### Commands
 
 ` + "```" + `bash
 loom queue add -t "Short title" -d "Detailed, self-contained description"  # queue a task
 loom queue add -t "Title" -d "Description" -p 0                           # high priority (0=highest, 4=lowest)
 loom queue list                                                            # list all work items
-loom queue show <id>                                                       # show item details + failure reasons
+loom queue show <id>                                                       # show item details, audit trail, failure reasons
 loom status                                                                # overall summary
 loom worker list                                                           # worker states
-loom logs                                                                  # tail all worker output
+loom logs                                                                  # last 20 lines from all active workers
 loom logs <worker>                                                         # tail specific worker output
+loom dashboard                                                             # live terminal dashboard (auto-refreshes)
+loom merge                                                                 # manually merge pending branches without supervisor
 ` + "```" + `
 
 ### Writing Good Task Descriptions
