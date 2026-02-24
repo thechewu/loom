@@ -1,0 +1,5 @@
+/loom
+/loom.exe
+*.exe~
+.loom/
+.beads/
