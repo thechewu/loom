@@ -72,24 +72,18 @@ func (m *Merger) poll() {
 	}
 }
 
-// mergeOne attempts to merge a worker branch into main.
-// Always marks done and cleans up — if the merge conflicts the changes
-// are dropped. Returns true if the merge succeeded, false if dropped.
+// mergeOne attempts to merge a task branch into main.
+// Branch is named loom/<bead-id> (not loom/<worker-name>) so it survives
+// worker reassignment. Always marks done and cleans up the branch.
 func (m *Merger) mergeOne(item beadsclient.Issue) bool {
-	workerName := item.Assignee
-	if workerName == "" {
-		m.Logger.Printf("merger: %s has no assignee, marking done", item.ID)
-		m.finish(item.ID, workerName)
-		return false
-	}
-	branch := "loom/" + workerName
+	branch := "loom/" + item.ID
 
 	m.Logger.Printf("merging %s (branch %s) into main", item.ID, branch)
 
 	// Ensure we're on main
 	if err := m.gitRun("checkout", "main"); err != nil {
 		m.Logger.Printf("merger: checkout main failed: %v — dropping %s", err, item.ID)
-		m.finish(item.ID, workerName)
+		m.finish(item.ID, branch)
 		return false
 	}
 
@@ -103,31 +97,24 @@ func (m *Merger) mergeOne(item beadsclient.Issue) bool {
 		m.Logger.Printf("merger: conflict on %s, dropping changes: %s",
 			item.ID, strings.TrimSpace(string(out)))
 		m.gitRun("merge", "--abort")
-		m.finish(item.ID, workerName)
+		m.finish(item.ID, branch)
 		return false
 	}
 
 	m.Logger.Printf("merged %s successfully", item.ID)
-	m.finish(item.ID, workerName)
+	m.finish(item.ID, branch)
 	return true
 }
 
-// finish marks a work item done and cleans up its worktree + branch.
-func (m *Merger) finish(beadID, workerName string) {
+// finish marks a work item done and cleans up its branch.
+// Worktree directories are managed by the worker pool, not the merger.
+func (m *Merger) finish(beadID, branch string) {
 	if err := m.Beads.MarkMerged(beadID); err != nil {
 		m.Logger.Printf("merger: mark merged %s: %v", beadID, err)
 	}
-	if workerName != "" {
-		m.removeWorkerWorktree(workerName)
-		m.deleteBranch("loom/" + workerName)
+	if branch != "" {
+		m.deleteBranch(branch)
 	}
-}
-
-func (m *Merger) removeWorkerWorktree(workerName string) {
-	worktreePath := m.WorktreeDir + "/" + workerName
-	cmd := exec.Command("git", "worktree", "remove", "--force", worktreePath)
-	cmd.Dir = m.RepoPath
-	cmd.Run() // best-effort
 }
 
 func (m *Merger) deleteBranch(branch string) {

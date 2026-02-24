@@ -19,6 +19,7 @@ import (
 // Pool manages a set of worker agent processes, each in its own git worktree.
 type Pool struct {
 	MaxWorkers  int
+	MaxRetries  int
 	AgentCmd    string   // e.g. "claude"
 	AgentArgs   []string // e.g. ["--print"]
 	RepoPath    string   // base git repo
@@ -30,17 +31,22 @@ type Pool struct {
 }
 
 type runningWorker struct {
-	Name    string
-	Cmd     *exec.Cmd
-	Cancel  context.CancelFunc
-	WorkDir string
-	BeadID  string
+	Name           string
+	Cmd            *exec.Cmd
+	Cancel         context.CancelFunc
+	WorkDir        string
+	BeadID         string
+	ResultPath     string
+	StartedAt      time.Time
+	LastOutputSize int64
+	LastOutputAt   time.Time
 }
 
 // NewPool creates a worker pool.
-func NewPool(beads *beadsclient.Client, repoPath, worktreeDir, agentCmd string, agentArgs []string, maxWorkers int) *Pool {
+func NewPool(beads *beadsclient.Client, repoPath, worktreeDir, agentCmd string, agentArgs []string, maxWorkers, maxRetries int) *Pool {
 	return &Pool{
 		MaxWorkers:  maxWorkers,
+		MaxRetries:  maxRetries,
 		AgentCmd:    agentCmd,
 		AgentArgs:   agentArgs,
 		RepoPath:    repoPath,
@@ -77,9 +83,10 @@ func (p *Pool) Spawn(name string, item *beadsclient.Issue) error {
 	}
 	p.mu.Unlock()
 
-	// Create git worktree
+	// Create git worktree — branch is named per-task (not per-worker)
+	// so the merger can find it even if the worker is reassigned.
 	worktreePath := filepath.Join(p.WorktreeDir, name)
-	branch := "loom/" + name
+	branch := "loom/" + item.ID
 	if err := createWorktree(p.RepoPath, worktreePath, branch); err != nil {
 		return fmt.Errorf("create worktree: %w", err)
 	}
@@ -141,12 +148,17 @@ func (p *Pool) Spawn(name string, item *beadsclient.Issue) error {
 		return fmt.Errorf("start agent: %w", err)
 	}
 
+	now := time.Now()
 	rw := &runningWorker{
-		Name:    name,
-		Cmd:     cmd,
-		Cancel:  cancel,
-		WorkDir: worktreePath,
-		BeadID:  item.ID,
+		Name:           name,
+		Cmd:            cmd,
+		Cancel:         cancel,
+		WorkDir:        worktreePath,
+		BeadID:         item.ID,
+		ResultPath:     resultPath,
+		StartedAt:      now,
+		LastOutputSize: 0,
+		LastOutputAt:   now,
 	}
 
 	p.mu.Lock()
@@ -182,33 +194,42 @@ func (p *Pool) waitForCompletion(rw *runningWorker, outFile *os.File) {
 	}
 
 	if err != nil {
-		p.Beads.FailWork(rw.BeadID, err.Error())
+		requeued, _ := p.Beads.RequeueOrFail(rw.BeadID, err.Error(), p.MaxRetries)
+		state := "dead"
+		if requeued {
+			state = "idle"
+		}
 		p.Beads.UpdateWorkerBead(rw.Name, &beadsclient.WorkerFields{
-			AgentState:    "dead",
+			AgentState:    state,
 			CurrentItem:   rw.BeadID,
 			LastHeartbeat: time.Now().UTC().Format(time.RFC3339),
 		})
-		// On failure: clean up worktree immediately (nothing to merge)
 		removeWorktree(p.RepoPath, rw.WorkDir)
 	} else {
 		// Commit any changes the agent made in the worktree
-		branch := "loom/" + rw.Name
+		branch := "loom/" + rw.BeadID
 		committed, commitErr := commitWorktree(rw.WorkDir, fmt.Sprintf("loom: %s", rw.BeadID))
 		if commitErr != nil {
-			p.Beads.FailWork(rw.BeadID, "commit failed: "+commitErr.Error())
+			requeued, _ := p.Beads.RequeueOrFail(rw.BeadID, "commit failed: "+commitErr.Error(), p.MaxRetries)
+			state := "dead"
+			if requeued {
+				state = "idle"
+			}
 			p.Beads.UpdateWorkerBead(rw.Name, &beadsclient.WorkerFields{
-				AgentState:    "dead",
+				AgentState:    state,
 				CurrentItem:   rw.BeadID,
 				LastHeartbeat: time.Now().UTC().Format(time.RFC3339),
 			})
 			removeWorktree(p.RepoPath, rw.WorkDir)
 		} else if committed {
-			// Changes were committed — mark pending-merge and PRESERVE worktree
+			// Changes were committed — mark pending-merge, remove worktree
+			// but PRESERVE the branch for the merger.
 			p.Beads.MarkPendingMerge(rw.BeadID, branch)
 			p.Beads.UpdateWorkerBead(rw.Name, &beadsclient.WorkerFields{
 				AgentState:    "idle",
 				LastHeartbeat: time.Now().UTC().Format(time.RFC3339),
 			})
+			removeWorktree(p.RepoPath, rw.WorkDir)
 		} else {
 			// No changes to merge — complete immediately and clean up
 			p.Beads.CompleteWork(rw.BeadID, result)
@@ -343,6 +364,46 @@ func (p *Pool) GetRunningBeadID(name string) string {
 		return ""
 	}
 	return rw.BeadID
+}
+
+// CheckActivity checks each worker's result file for output growth.
+// Updates internal tracking and returns workers whose output hasn't grown
+// since the last check, along with how long they've been inactive.
+func (p *Pool) CheckActivity() map[string]time.Duration {
+	stale := make(map[string]time.Duration)
+
+	p.mu.Lock()
+	names := make([]string, 0, len(p.workers))
+	for name := range p.workers {
+		names = append(names, name)
+	}
+	p.mu.Unlock()
+
+	now := time.Now()
+	for _, name := range names {
+		p.mu.Lock()
+		rw, exists := p.workers[name]
+		p.mu.Unlock()
+		if !exists {
+			continue
+		}
+
+		var currentSize int64
+		if info, err := os.Stat(rw.ResultPath); err == nil {
+			currentSize = info.Size()
+		}
+
+		p.mu.Lock()
+		if currentSize > rw.LastOutputSize {
+			rw.LastOutputSize = currentSize
+			rw.LastOutputAt = now
+		}
+		inactive := now.Sub(rw.LastOutputAt)
+		p.mu.Unlock()
+
+		stale[name] = inactive
+	}
+	return stale
 }
 
 // --- git commit helpers ---

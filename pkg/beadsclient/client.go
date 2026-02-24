@@ -263,6 +263,28 @@ func (c *Client) RequeueWork(beadID, reason string) error {
 	return nil
 }
 
+// RequeueOrFail requeues a work item if it hasn't exceeded maxRetries,
+// otherwise marks it as permanently failed. Returns true if requeued.
+func (c *Client) RequeueOrFail(beadID, reason string, maxRetries int) (bool, error) {
+	retries := c.CountRetries(beadID)
+	if retries >= maxRetries {
+		err := c.FailWork(beadID, fmt.Sprintf("exceeded %d retries, last error: %s", maxRetries, reason))
+		return false, err
+	}
+	err := c.RequeueWork(beadID, fmt.Sprintf("(attempt %d/%d) %s", retries+1, maxRetries, reason))
+	return err == nil, err
+}
+
+// CountRetries counts how many times a work item has been requeued
+// by counting "Requeued:" comments.
+func (c *Client) CountRetries(beadID string) int {
+	out, err := c.run("bd", "show", beadID, "--json")
+	if err != nil {
+		return 0
+	}
+	return strings.Count(out, "Requeued:")
+}
+
 // GetIssue retrieves a single issue by ID.
 func (c *Client) GetIssue(id string) (*Issue, error) {
 	out, err := c.run("bd", "show", id, "--json")

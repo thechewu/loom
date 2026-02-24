@@ -66,7 +66,11 @@ func New(cfg Config) (*Supervisor, error) {
 	beads := beadsclient.NewClient(beadsDir, loomDir)
 	worktreeDir := filepath.Join(loomDir, "worktrees")
 
-	pool := worker.NewPool(beads, cfg.RepoPath, worktreeDir, cfg.AgentCmd, cfg.AgentArgs, cfg.MaxWorkers)
+	maxRetries := cfg.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 3
+	}
+	pool := worker.NewPool(beads, cfg.RepoPath, worktreeDir, cfg.AgentCmd, cfg.AgentArgs, cfg.MaxWorkers, maxRetries)
 
 	m := &merger.Merger{
 		Beads:        beads,
@@ -169,36 +173,13 @@ func (sv *Supervisor) handleDeadWorker(name string) {
 }
 
 func (sv *Supervisor) handleStale() {
-	workers, err := sv.Beads.ListWorkers()
-	if err != nil {
-		return
-	}
-
-	for _, w := range workers {
-		if w.Status == "closed" {
-			continue
-		}
-		fields := beadsclient.ParseWorkerDescription(w.Description)
-		if fields.AgentState != "working" {
-			continue
-		}
-
-		// Check if heartbeat is stale
-		if fields.LastHeartbeat == "" {
-			continue
-		}
-		lastSeen, err := time.Parse(time.RFC3339, fields.LastHeartbeat)
-		if err != nil {
-			continue
-		}
-		if time.Since(lastSeen) > sv.StuckTimeout {
-			name := w.Title
-			// Strip "Worker: " prefix
-			if len(name) > 8 && name[:8] == "Worker: " {
-				name = name[8:]
-			}
-			sv.Logger.Printf("worker %s is stale (last heartbeat %s ago), reaping",
-				name, time.Since(lastSeen).Truncate(time.Second))
+	// Check output activity for all running workers. If a worker's result
+	// file hasn't grown within StuckTimeout, the agent is hung — kill and requeue.
+	activity := sv.Pool.CheckActivity()
+	for name, inactive := range activity {
+		if inactive > sv.StuckTimeout {
+			sv.Logger.Printf("worker %s has no output for %s (stuck timeout %s), killing and requeuing",
+				name, inactive.Truncate(time.Second), sv.StuckTimeout)
 			sv.handleDeadWorker(name)
 		}
 	}
