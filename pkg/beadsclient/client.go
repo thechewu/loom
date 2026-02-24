@@ -204,11 +204,12 @@ func (c *Client) CompleteWork(beadID, result string) error {
 	return nil
 }
 
-// FailWork marks a work item as failed.
+// FailWork marks a work item as failed with a reason.
 func (c *Client) FailWork(beadID, reason string) error {
 	if _, err := c.run("bd", "update", beadID,
 		"--add-label", LabelFailed,
 		"--remove-label", LabelPending,
+		"--remove-label", LabelPendingMerge,
 	); err != nil {
 		return fmt.Errorf("fail %s: %w", beadID, err)
 	}
@@ -404,6 +405,19 @@ func (c *Client) CloseWorkerBead(name string) error {
 	return err
 }
 
+// GetComments returns the comments on a bead as a string slice.
+func (c *Client) GetComments(beadID string) ([]string, error) {
+	out, err := c.run("bd", "comments", beadID)
+	if err != nil {
+		return nil, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // --- Summary operations ---
 
 // WorkSummary holds aggregate counts of work items.
@@ -426,15 +440,16 @@ func (c *Client) GetWorkSummary() (*WorkSummary, error) {
 	s := &WorkSummary{Total: len(items)}
 	for _, item := range items {
 		switch {
-		case item.HasLabel(LabelPendingMerge):
-			s.PendingMerge++
-		case item.HasLabel(LabelPending):
-			s.Pending++
 		case item.HasLabel(LabelDone):
 			s.Done++
 		case item.HasLabel(LabelFailed):
 			s.Failed++
-		case item.Status == "in_progress":
+		case item.HasLabel(LabelPendingMerge):
+			s.PendingMerge++
+		case item.HasLabel(LabelPending):
+			s.Pending++
+		default:
+			// Catch items in_progress or in an unknown state
 			s.InProgress++
 		}
 	}

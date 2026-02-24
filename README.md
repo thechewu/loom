@@ -13,7 +13,9 @@ Worker 2 claims task → runs claude in worktree → commits changes → merger 
 ...
 ```
 
-Each worker gets its own git worktree (isolated branch). When a worker finishes, its changes are committed and queued for merge. A merger agent runs alongside the supervisor and merges branches into main one at a time. If a merge conflicts, the changes are dropped and the item is marked done anyway -- throughput over preservation.
+Each worker gets its own git worktree (isolated branch named `loom/<bead-id>`). When a worker finishes, its changes are committed and queued for merge. A merger runs alongside the supervisor and merges branches into main one at a time. If a merge conflicts, the changes are dropped and the item is marked done anyway -- throughput over preservation.
+
+Failed tasks are automatically retried up to 3 times before being permanently marked as failed. Workers that produce no output for the stuck timeout duration (default 10m) are killed and their tasks requeued.
 
 ## Dependencies
 
@@ -43,18 +45,9 @@ cd /path/to/your/git/repo
 loom init .
 ```
 
-This creates `.loom/` (workspace) and `.beads/` (issue database), and starts a Dolt server.
+This creates `.loom/` (workspace) and `.beads/` (issue database), starts a Dolt server, and appends loom usage instructions to the project's `CLAUDE.md` so that Claude CLI sessions automatically learn how to use loom.
 
-### 2. Configure beads types
-
-```bash
-bd config set issue_prefix lm
-bd config set types.custom "work,worker"
-```
-
-If your project already uses beads with custom types, append `work,worker` to the existing list.
-
-### 3. Add to .gitignore
+### 2. Add to .gitignore
 
 ```bash
 echo -e ".loom/\n.beads/" >> .gitignore
@@ -68,7 +61,7 @@ echo -e ".loom/\n.beads/" >> .gitignore
 loom queue add -t "Short title" -d "Detailed description of what the agent should do"
 ```
 
-The `-d` description is the agent's prompt -- be specific. Priority with `-p` (0=highest, 4=lowest, default 2):
+The `-d` description is the agent's prompt -- be specific. Workers start with zero context, so descriptions must be fully self-contained. Priority with `-p` (0=highest, 4=lowest, default 2):
 
 ```bash
 loom queue add -t "Critical fix" -d "..." -p 0
@@ -83,9 +76,10 @@ loom run --workers 4 --repo .
 This starts the supervisor (foreground) which:
 1. Polls for pending work items
 2. Spawns Claude agents in git worktrees
-3. Commits agent changes when done
-4. Merges branches into main
-5. Cleans up worktrees
+3. Monitors worker activity (kills stuck workers, retries failed tasks)
+4. Commits agent changes when done
+5. Merges branches into main
+6. Cleans up branches after merge
 
 Only one `loom run` instance is allowed per project (enforced by lockfile).
 
@@ -93,7 +87,7 @@ Flags:
 - `--workers N` -- max parallel agents (default 4)
 - `--repo PATH` -- git repo path (default `.`)
 - `--poll DURATION` -- poll interval (default `5s`)
-- `--stuck-timeout DURATION` -- mark worker stuck after this (default `10m`)
+- `--stuck-timeout DURATION` -- kill worker if no output for this long (default `10m`)
 - `--agent CMD` -- agent command (default `claude`)
 - `--agent-args` -- extra args passed to the agent
 
@@ -105,6 +99,17 @@ From another terminal, queue more items. The running supervisor picks them up au
 loom queue add -t "Another task" -d "..."
 ```
 
+### Monitor progress
+
+```bash
+loom status              # overall summary (pending/in_progress/done/failed counts)
+loom queue list          # work items with status
+loom queue show <id>     # item details including failure reasons and retry history
+loom worker list         # worker states
+loom logs                # last 20 lines from all active workers
+loom logs <worker>       # tail a specific worker's output (follow mode)
+```
+
 ### Manual merge
 
 Merge all pending branches without running the full supervisor:
@@ -113,13 +118,12 @@ Merge all pending branches without running the full supervisor:
 loom merge
 ```
 
-### Check status
+### Claude CLI integration
+
+Print the CLAUDE.md snippet that teaches Claude about loom (useful for manual review or custom CLAUDE.md files):
 
 ```bash
-loom status          # overall summary
-loom queue list      # work items
-loom worker list     # worker states
-loom dolt status     # dolt server
+loom prompt
 ```
 
 ### Manage the Dolt server
@@ -135,13 +139,25 @@ The Dolt server runs independently -- it survives loom process exits. If you reb
 ## Architecture
 
 ```
-cmd/loom/main.go          CLI entry point (cobra commands)
-pkg/supervisor/            Supervisor loop: polls, assigns, health-checks
-pkg/worker/pool.go         Worker pool: spawns agents in worktrees, commits changes
-pkg/merger/merger.go       Merger: merges worker branches into main
-pkg/beadsclient/client.go  Beads wrapper: work items, worker state, labels
-pkg/beadsclient/dolt.go    Dolt server lifecycle management
+cmd/loom/main.go              CLI entry point (cobra commands)
+pkg/supervisor/                Supervisor loop: polls, assigns, health-checks, stuck detection
+pkg/worker/pool.go             Worker pool: spawns agents in worktrees, commits changes, retries
+pkg/merger/merger.go           Merger: merges task branches (loom/<bead-id>) into main
+pkg/beadsclient/client.go      Beads wrapper: work items, worker state, retry tracking
+pkg/beadsclient/dolt.go        Dolt server lifecycle management
+pkg/prompt/prompt.go           CLAUDE.md snippet injected by `loom init`
 ```
+
+### Retry & Failure Handling
+
+- Workers that exit non-zero have their tasks automatically requeued (up to 3 retries)
+- Workers producing no output for `--stuck-timeout` are killed and their tasks requeued
+- After exhausting retries, tasks are marked permanently failed with a reason
+- Use `loom queue show <id>` to see failure reasons and retry history
+
+### Branch Naming
+
+Branches are named per-task (`loom/lm-xxx`), not per-worker. This prevents a race condition where a worker being reassigned would destroy the previous task's branch before the merger could merge it.
 
 ## Troubleshooting
 
@@ -163,3 +179,7 @@ git branch | grep loom/ | xargs -r git branch -D
 ```bash
 rm .loom/loom.lock
 ```
+
+## License
+
+MIT

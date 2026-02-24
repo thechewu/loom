@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -38,9 +40,11 @@ func init() {
 	rootCmd.AddCommand(doltCmd)
 	rootCmd.AddCommand(mergeCmd)
 	rootCmd.AddCommand(promptCmd)
+	rootCmd.AddCommand(logsCmd)
 
 	queueCmd.AddCommand(queueAddCmd)
 	queueCmd.AddCommand(queueListCmd)
+	queueCmd.AddCommand(queueShowCmd)
 
 	workerCmd.AddCommand(workerListCmd)
 
@@ -186,6 +190,45 @@ var queueListCmd = &cobra.Command{
 				it.Priority, assignee)
 		}
 		w.Flush()
+		return nil
+	},
+}
+
+var queueShowCmd = &cobra.Command{
+	Use:   "show <bead-id>",
+	Short: "Show work item details including failure reasons",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		beads, err := openBeads()
+		if err != nil {
+			return err
+		}
+
+		issue, err := beads.GetIssue(args[0])
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("ID:       %s\n", issue.ID)
+		fmt.Printf("Title:    %s\n", issue.Title)
+		fmt.Printf("Status:   %s\n", effectiveStatus(*issue))
+		fmt.Printf("Priority: %d\n", issue.Priority)
+		fmt.Printf("Assignee: %s\n", defaultStr(issue.Assignee, "-"))
+		fmt.Printf("Labels:   %s\n", strings.Join(issue.Labels, ", "))
+		fmt.Printf("Created:  %s\n", issue.CreatedAt)
+		fmt.Printf("Updated:  %s\n", issue.UpdatedAt)
+		if issue.Description != "" {
+			fmt.Printf("\n--- Description ---\n%s\n", issue.Description)
+		}
+
+		// Show comments (contains failure reasons and requeue history)
+		comments, err := beads.GetComments(args[0])
+		if err == nil && len(comments) > 0 {
+			fmt.Printf("\n--- History ---\n")
+			for _, c := range comments {
+				fmt.Println(c)
+			}
+		}
 		return nil
 	},
 }
@@ -399,6 +442,102 @@ var mergeCmd = &cobra.Command{
 		fmt.Printf("merged=%d  dropped=%d\n", merged, dropped)
 		return nil
 	},
+}
+
+// --- logs ---
+
+var logsCmd = &cobra.Command{
+	Use:   "logs [worker-name]",
+	Short: "Tail worker output (all workers or a specific one)",
+	Args:  cobra.MaximumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		loomDir, err := findLoomDir()
+		if err != nil {
+			return err
+		}
+		worktreeDir := filepath.Join(loomDir, "worktrees")
+
+		if len(args) > 0 {
+			// Tail a specific worker
+			return tailWorkerLog(filepath.Join(worktreeDir, args[0], ".loom", "result.txt"))
+		}
+
+		// Tail all workers
+		entries, err := os.ReadDir(worktreeDir)
+		if err != nil {
+			return fmt.Errorf("read worktrees dir: %w", err)
+		}
+
+		if len(entries) == 0 {
+			fmt.Println("no active workers")
+			return nil
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			resultPath := filepath.Join(worktreeDir, name, ".loom", "result.txt")
+			info, err := os.Stat(resultPath)
+			if err != nil {
+				fmt.Printf("=== %s === (no output)\n\n", name)
+				continue
+			}
+			fmt.Printf("=== %s === (%s, %d bytes)\n", name, info.ModTime().Format("15:04:05"), info.Size())
+			printTail(resultPath, 20)
+			fmt.Println()
+		}
+		return nil
+	},
+}
+
+func tailWorkerLog(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open log: %w", err)
+	}
+	defer f.Close()
+
+	// Print existing content
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fmt.Println(scanner.Text())
+	}
+
+	// Follow new output
+	fmt.Println("--- following (ctrl-c to stop) ---")
+	for {
+		line, err := f.Read(make([]byte, 0))
+		_ = line
+		if err == io.EOF {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		buf := make([]byte, 4096)
+		n, err := f.Read(buf)
+		if n > 0 {
+			os.Stdout.Write(buf[:n])
+		}
+		if err != nil && err != io.EOF {
+			return err
+		}
+	}
+}
+
+func printTail(path string, lines int) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	allLines := strings.Split(string(data), "\n")
+	start := len(allLines) - lines
+	if start < 0 {
+		start = 0
+	}
+	for _, line := range allLines[start:] {
+		fmt.Println(line)
+	}
 }
 
 // --- prompt ---

@@ -12,13 +12,16 @@ This project uses [loom](https://github.com/thechewu/loom) for parallel multi-ag
 loom queue add -t "Short title" -d "Detailed, self-contained description"  # queue a task
 loom queue add -t "Title" -d "Description" -p 0                           # high priority (0=highest, 4=lowest)
 loom queue list                                                            # list all work items
+loom queue show <id>                                                       # show item details + failure reasons
 loom status                                                                # overall summary
 loom worker list                                                           # worker states
+loom logs                                                                  # tail all worker output
+loom logs <worker>                                                         # tail specific worker output
 ` + "```" + `
 
 ### Writing Good Task Descriptions
 
-Worker agents start with **zero context** from this session. The ` + "`-d`" + ` description is the agent's entire prompt. Every description must be fully self-contained:
+Worker agents start with **zero context** from this session. The ` + "`-d`" + ` description is the agent's entire prompt. Before writing a task description, **read the relevant source files** to understand current signatures, imports, and patterns. Every description must be fully self-contained:
 
 - **Exact file paths**: specify which files to create or modify
 - **Complete code context**: include import statements, constructor signatures, and data structures the agent will need
