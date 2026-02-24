@@ -93,6 +93,22 @@ func renderDashboard(beads *beadsclient.Client) string {
 	refreshed := fmt.Sprintf("%s%s refreshed %s%s", colorDim, colorWhite, now, colorReset)
 	fmt.Fprintf(&buf, "  %s          %s\n", header, refreshed)
 	fmt.Fprintf(&buf, "  %s────────────────────────────────────────────────────────────────────────────%s\n", colorDim, colorReset)
+
+	// Config line
+	cfg := loadConfigFile(beads.LoomDir)
+	mergeMode := cfg.MergeMode
+	if mergeMode == "" {
+		mergeMode = "main"
+	}
+	configLine := fmt.Sprintf("merge: %s", mergeMode)
+	if mergeMode == "loom" {
+		branch := cfg.MergeBranch
+		if branch == "" {
+			branch = "loom"
+		}
+		configLine += fmt.Sprintf(" → %s", branch)
+	}
+	fmt.Fprintf(&buf, "  %s%s%s\n", colorDim, configLine, colorReset)
 	fmt.Fprintf(&buf, "\n")
 
 	// Progress section
